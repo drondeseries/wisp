@@ -23,10 +23,12 @@ type Client struct {
 	http       *http.Client
 }
 
-// Stream is one playable result from the Search API.
+// Stream is one playable result from the Search API. Resolution and Filename
+// come straight from AIOStreams' own release parsing — wisp does not re-parse.
 type Stream struct {
-	URL      string
-	Filename string
+	URL        string
+	Filename   string
+	Resolution string // e.g. "2160p", "1080p" (from AIOStreams parsedFile)
 }
 
 // New builds a client from an AIOStreams manifest URL and password.
@@ -70,6 +72,10 @@ type searchResult struct {
 	URL         string `json:"url"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Filename    string `json:"filename"`
+	ParsedFile  struct {
+		Resolution string `json:"resolution"`
+	} `json:"parsedFile"`
 }
 
 type searchResponse struct {
@@ -122,7 +128,7 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 		if strings.TrimSpace(r.URL) == "" {
 			continue
 		}
-		streams = append(streams, Stream{URL: r.URL, Filename: filenameFromResult(r)})
+		streams = append(streams, Stream{URL: r.URL, Filename: filenameFromResult(r), Resolution: r.ParsedFile.Resolution})
 	}
 	return streams, nil
 }
@@ -141,9 +147,12 @@ func (c *Client) origin() (string, error) {
 	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
-// filenameFromResult recovers the release filename (for extension hints)
-// from the resolver URL's last path segment, falling back to the name field.
+// filenameFromResult uses AIOStreams' parsed filename when present, else
+// recovers it from the resolver URL's last path segment.
 func filenameFromResult(r searchResult) string {
+	if strings.TrimSpace(r.Filename) != "" {
+		return strings.TrimSpace(r.Filename)
+	}
 	if parsed, err := url.Parse(r.URL); err == nil {
 		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 		for i := len(segments) - 1; i >= 0; i-- {

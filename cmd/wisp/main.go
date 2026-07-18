@@ -153,14 +153,18 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sourceURL, size, filename, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode)
+	sourceURL, size, filename, resolution, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode)
 	if err != nil {
 		http.Error(w, "no playable stream: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	// Label with the resolution AIOStreams actually selected; fall back to the
-	// caller's hint, then 1080p. (Silo reads real metadata regardless.)
-	quality := library.DetectQuality(filename)
+	// Label with AIOStreams' own parsed resolution. Fall back to a filename
+	// scan only if it's absent, then the caller's hint, then 1080p. (Silo reads
+	// real metadata regardless — this only names the file.)
+	quality := resolution
+	if quality == "" {
+		quality = library.DetectQuality(filename)
+	}
 	if quality == "" {
 		quality = req.Quality
 	}
@@ -256,7 +260,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // reResolve refreshes a pin whose upstream failed by re-searching AIOStreams.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	sourceURL, size, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode)
+	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode)
 	if err != nil {
 		return err
 	}
@@ -265,20 +269,20 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 }
 
 // resolve picks the top-ranked playable stream and measures its size.
-func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int) (sourceURL string, size int64, filename string, err error) {
+func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int) (sourceURL string, size int64, filename, resolution string, err error) {
 	streams, err := a.aio.Search(ctx, mediaType, imdbID, season, episode)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", "", err
 	}
 	if len(streams) == 0 {
-		return "", 0, "", fmt.Errorf("no results")
+		return "", 0, "", "", fmt.Errorf("no results")
 	}
 	top := streams[0]
 	size, err = headSize(ctx, top.URL)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("size probe: %w", err)
+		return "", 0, "", "", fmt.Errorf("size probe: %w", err)
 	}
-	return top.URL, size, top.Filename, nil
+	return top.URL, size, top.Filename, top.Resolution, nil
 }
 
 // headSize follows redirects to the CDN and returns the reported size.
