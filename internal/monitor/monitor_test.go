@@ -211,7 +211,7 @@ func TestPersistResultRespectsConcurrentIntake(t *testing.T) {
 	st.PutMonitored(ctx, store.Monitored{Key: "series:tt7", MediaType: "series", IMDbID: "tt7", Enabled: true, Qualities: []string{"1080p", "2160p"}, DueAt: now})
 
 	// Scheduler finishes its pass on the STALE snapshot, computing a far DueAt.
-	m.persistResult(ctx, *snapshot, now.Add(100*time.Hour), false, "")
+	m.persistResult(ctx, *snapshot, now.Add(100*time.Hour), false, store.DueReasonRetry, "")
 
 	cur, _ := st.GetMonitored(ctx, "series:tt7")
 	if len(cur.Qualities) != 2 {

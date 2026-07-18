@@ -10,6 +10,18 @@ import (
 
 var monitorsBucket = []byte("monitors")
 
+// DueReason values record why a Monitored item's DueAt was set, so consumers
+// (the schedule API) can tell a real content date from a plain retry ceiling.
+const (
+	// DueReasonRetry is the zero value: DueAt is a fallback re-check ceiling, not
+	// a real date (no stream yet, a metadata error, or no known upcoming episode).
+	DueReasonRetry = ""
+	// DueReasonRelease means DueAt is a movie's home-media release date.
+	DueReasonRelease = "release"
+	// DueReasonAirstamp means DueAt is a series' next episode air time.
+	DueReasonAirstamp = "airstamp"
+)
+
 // Monitored is a title wisp is tracking until it can be pinned: a movie awaiting
 // its home-media release/availability, or an ongoing series whose new episodes
 // should be pinned as they air. It persists in the same bbolt DB as pins so the
@@ -25,6 +37,7 @@ type Monitored struct {
 	Qualities []string  // requested tiers; empty = default (best stream)
 	Seasons   []int     // series: requested seasons; empty = all
 	DueAt     time.Time // earliest time worth re-checking (release or next air)
+	DueReason string    // why DueAt was set — one of the DueReason* constants
 
 	// Observability / control (kept-and-marked so the monitor list doubles as a
 	// request history — idea from drondeseries's PR #5).

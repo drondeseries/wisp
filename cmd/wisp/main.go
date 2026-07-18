@@ -23,9 +23,9 @@ import (
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/mount"
+	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/seerr"
 	"github.com/dreulavelle/wisp/internal/server"
-	"github.com/dreulavelle/wisp/internal/silowebhook"
 	"github.com/dreulavelle/wisp/internal/store"
 	"github.com/rclone/rclone/fs"
 )
@@ -43,6 +43,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	warnDBPersistence(cfg.DBPath, log)
+
+	notifier := notify.New(notify.Options{
+		ArrWebhookURL:  cfg.NotifyArrWebhookURL,
+		SiloWebhookURL: cfg.SiloWebhookURL,
+		JellyfinURL:    cfg.NotifyJellyfinURL, JellyfinAPIKey: cfg.NotifyJellyfinAPIKey,
+		EmbyURL: cfg.NotifyEmbyURL, EmbyAPIKey: cfg.NotifyEmbyAPIKey,
+		PlexURL: cfg.NotifyPlexURL, PlexToken: cfg.NotifyPlexToken,
+		MountPath: cfg.MountPath,
+	}, log)
+	if targets := notifier.Targets(); len(targets) > 0 {
+		log.Info("media-server notifications enabled", "targets", targets)
+	}
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
 	if !aio.HasCredentials() {
@@ -50,7 +63,7 @@ func main() {
 	}
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
-		webhook:   silowebhook.New(cfg.SiloWebhookURL, cfg.MountPath, log),
+		webhook:   notifier,
 		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets),
 		seerr:     seerr.New(cfg.SeerrURL, cfg.SeerrAPIKey),
 		startedAt: time.Now(),
@@ -75,6 +88,7 @@ func main() {
 	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
 	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
 	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
+	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -157,7 +171,7 @@ type app struct {
 	log       *slog.Logger
 	srv       *server.Server
 	mnt       *mount.Mount
-	webhook   *silowebhook.Client
+	webhook   notify.Notifier
 	meta      *metadata.Service
 	mon       *monitor.Monitor
 	seerr     *seerr.Client
@@ -395,6 +409,10 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"monitors":       monitors,
 		"mounted":        a.mnt.Healthy(),
 		"mount_path":     a.mountPath,
+		"schedule": map[string]any{
+			"monitors":         monitors,
+			"interval_seconds": int(a.mon.Interval().Seconds()),
+		},
 	})
 }
 

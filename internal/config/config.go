@@ -22,9 +22,25 @@ type Config struct {
 	ListenAddr string
 	// DBPath is where the pin database lives.
 	DBPath string
-	// SiloWebhookURL is the optional Silo Autoscan webhook notified after
-	// imports, renames, and file deletions.
+	// SiloWebhookURL is the deprecated alias for NotifyArrWebhookURL
+	// (WISP_SILO_WEBHOOK_URL). It still works; the canonical name wins if both
+	// are set.
 	SiloWebhookURL string
+	// NotifyArrWebhookURL is the canonical ARR-compatible Autoscan webhook
+	// (Silo/Sonarr/Radarr shape) notified after imports, renames, and deletions.
+	NotifyArrWebhookURL string
+	// NotifyJellyfinURL / NotifyJellyfinAPIKey point at a Jellyfin server (or
+	// Silo's Jellyfin-compatible endpoint) rescanned via Library/Media/Updated.
+	NotifyJellyfinURL    string
+	NotifyJellyfinAPIKey string
+	// NotifyEmbyURL / NotifyEmbyAPIKey point at an Emby server (same protocol,
+	// routed under /emby).
+	NotifyEmbyURL    string
+	NotifyEmbyAPIKey string
+	// NotifyPlexURL / NotifyPlexToken point at a Plex server refreshed via
+	// per-folder partial scans.
+	NotifyPlexURL   string
+	NotifyPlexToken string
 	// MountPath, when set, makes wisp self-mount the library there via the
 	// embedded rclone VFS. Empty = serve HTTP only (mount it yourself).
 	MountPath string
@@ -61,21 +77,28 @@ func (c *Config) SelfMount() bool { return c.MountPath != "" }
 // Load reads configuration from environment variables and validates it.
 func Load() (*Config, error) {
 	c := &Config{
-		AIOStreamsURL:      strings.TrimSpace(os.Getenv("WISP_AIOSTREAMS_URL")),
-		AIOStreamsPassword: os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
-		ListenAddr:         envOr("WISP_LISTEN_ADDR", ":8080"),
-		DBPath:             envOr("WISP_DB_PATH", "/data/wisp.db"),
-		SiloWebhookURL:     strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
-		MountPath:          strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
-		MountAllowOther:    boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
-		LogLevel:           strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
-		ReadChunkSize:      sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
-		ReadChunkSizeLimit: sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
-		SeerrURL:           strings.TrimSpace(strings.TrimRight(os.Getenv("WISP_SEERR_URL"), "/")),
-		SeerrAPIKey:        strings.TrimSpace(os.Getenv("WISP_SEERR_API_KEY")),
-		ScheduleInterval:   durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
-		TMDBAPIKey:         strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
-		TMDBMarkets:        listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
+		AIOStreamsURL:        strings.TrimSpace(os.Getenv("WISP_AIOSTREAMS_URL")),
+		AIOStreamsPassword:   os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
+		ListenAddr:           envOr("WISP_LISTEN_ADDR", ":8080"),
+		DBPath:               envOr("WISP_DB_PATH", "/data/wisp.db"),
+		SiloWebhookURL:       strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
+		NotifyArrWebhookURL:  strings.TrimSpace(os.Getenv("WISP_NOTIFY_ARR_WEBHOOK_URL")),
+		NotifyJellyfinURL:    strings.TrimSpace(os.Getenv("WISP_NOTIFY_JELLYFIN_URL")),
+		NotifyJellyfinAPIKey: strings.TrimSpace(os.Getenv("WISP_NOTIFY_JELLYFIN_API_KEY")),
+		NotifyEmbyURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_URL")),
+		NotifyEmbyAPIKey:     strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_API_KEY")),
+		NotifyPlexURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_URL")),
+		NotifyPlexToken:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_TOKEN")),
+		MountPath:            strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
+		MountAllowOther:      boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
+		LogLevel:             strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
+		ReadChunkSize:        sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
+		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
+		SeerrURL:             strings.TrimSpace(strings.TrimRight(os.Getenv("WISP_SEERR_URL"), "/")),
+		SeerrAPIKey:          strings.TrimSpace(os.Getenv("WISP_SEERR_API_KEY")),
+		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
+		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
+		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")

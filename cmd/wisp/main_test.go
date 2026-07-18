@@ -14,18 +14,18 @@ import (
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
-	"github.com/dreulavelle/wisp/internal/silowebhook"
+	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/store"
 )
 
 // A file removed through the mount must both unpin and fire the Silo delete
 // webhook — the same path the API delete takes.
 func TestMountedDeleteUnpinsAndNotifiesSilo(t *testing.T) {
-	var events []map[string]any
+	events := make(chan map[string]any, 4)
 	silo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&payload)
-		events = append(events, payload)
+		events <- payload
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer silo.Close()
@@ -45,7 +45,7 @@ func TestMountedDeleteUnpinsAndNotifiesSilo(t *testing.T) {
 	}
 
 	a := &app{store: st, log: slog.New(slog.DiscardHandler),
-		webhook: silowebhook.New(silo.URL, "/mnt/wisp", slog.New(slog.DiscardHandler))}
+		webhook: notify.New(notify.Options{ArrWebhookURL: silo.URL, MountPath: "/mnt/wisp"}, slog.New(slog.DiscardHandler))}
 
 	if err := a.deleteMountedPin(context.Background(), vpath); err != nil {
 		t.Fatalf("deleteMountedPin: %v", err)
@@ -53,8 +53,14 @@ func TestMountedDeleteUnpinsAndNotifiesSilo(t *testing.T) {
 	if pin, _ := st.ByPath(context.Background(), vpath); pin != nil {
 		t.Fatal("pin still present after mounted delete")
 	}
-	if len(events) != 1 || events[0]["eventType"] != "EpisodeFileDelete" {
-		t.Fatalf("expected one EpisodeFileDelete webhook, got %#v", events)
+	// Delivery is fire-and-forget on a detached goroutine; wait for it.
+	select {
+	case ev := <-events:
+		if ev["eventType"] != "EpisodeFileDelete" {
+			t.Fatalf("expected EpisodeFileDelete webhook, got %#v", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("delete webhook was not delivered")
 	}
 }
 
@@ -240,7 +246,7 @@ func TestDeletePinRejectsUnknownQuality(t *testing.T) {
 	_ = st.Upsert(context.Background(), store.Pin{IMDbID: "tt5", MediaType: "movie", Quality: "1080p", VirtualPath: "movies/X - [1080p].mkv"})
 
 	a := &app{store: st, log: slog.New(slog.DiscardHandler),
-		webhook: silowebhook.New("", "", slog.New(slog.DiscardHandler))}
+		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler))}
 	rec := httptest.NewRecorder()
 	body := `{"imdb_id":"tt5","quality":"1o80p"}`
 	a.handleDeletePin(rec, httptest.NewRequest(http.MethodDelete, "/api/pins", strings.NewReader(body)))
@@ -268,7 +274,7 @@ func TestHandleAddQualityPinsCoexist(t *testing.T) {
 	a := &app{
 		store: st, log: slog.New(slog.DiscardHandler),
 		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
-		webhook: silowebhook.New("", "", slog.New(slog.DiscardHandler)),
+		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
 	}
 
 	add := func(quality string) int {

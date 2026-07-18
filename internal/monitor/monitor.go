@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/library"
@@ -74,6 +75,10 @@ type Monitor struct {
 	interval time.Duration
 	now      func() time.Time
 	wake     chan struct{}
+	// nextWakeNano is the unix-nano deadline of the sleep timer the Run loop last
+	// armed, published so the schedule API reports the scheduler's real next wake
+	// rather than a reconstruction. Zero until the first pass arms a timer.
+	nextWakeNano atomic.Int64
 	// mu serializes read-modify-write of a monitored item so the scheduler and a
 	// concurrent Intake/delete can't clobber each other (network processing runs
 	// outside the lock).
@@ -90,6 +95,20 @@ func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.D
 		now:  time.Now,
 		wake: make(chan struct{}, 1),
 	}
+}
+
+// Interval reports the fallback re-check ceiling — the longest the scheduler
+// will sleep when no sooner airstamp/release is known.
+func (m *Monitor) Interval() time.Duration { return m.interval }
+
+// NextWake reports when the scheduler's sleep timer is next set to fire. It
+// returns the zero time before the first pass has armed a timer.
+func (m *Monitor) NextWake() time.Time {
+	nano := m.nextWakeNano.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
 }
 
 // Intake registers a request and wakes the scheduler to act on it immediately.
@@ -154,6 +173,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		if delay < time.Second {
 			delay = time.Second // never busy-loop
 		}
+		m.nextWakeNano.Store(m.now().Add(delay).UnixNano())
 		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -200,14 +220,15 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 		var (
 			due       time.Time
 			completed bool
+			reason    string
 			errMsg    string
 		)
 		if it.MediaType == "series" {
-			due, errMsg = m.processSeries(ctx, it)
+			due, reason, errMsg = m.processSeries(ctx, it)
 		} else {
-			due, completed, errMsg = m.processMovie(ctx, it)
+			due, completed, reason, errMsg = m.processMovie(ctx, it)
 		}
-		if effective := m.persistResult(ctx, it, due, completed, errMsg); !effective.IsZero() {
+		if effective := m.persistResult(ctx, it, due, completed, reason, errMsg); !effective.IsZero() {
 			if earliest.IsZero() || effective.Before(earliest) {
 				earliest = effective
 			}
@@ -216,12 +237,12 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 	return earliest
 }
 
-// persistResult folds a scheduler pass's outcome (next-due, completed, error)
-// into the stored item under the lock. If a concurrent Intake changed the item
-// since our snapshot (UpdatedAt differs), its DueAt/Completed win — we only
-// record LastChecked/LastError. Returns the item's effective next-due time, or
-// zero if it was deleted or is complete (no wake needed).
-func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, due time.Time, completed bool, errMsg string) time.Time {
+// persistResult folds a scheduler pass's outcome (next-due, reason, completed,
+// error) into the stored item under the lock. If a concurrent Intake changed the
+// item since our snapshot (UpdatedAt differs), its DueAt/DueReason/Completed win
+// — we only record LastChecked/LastError. Returns the item's effective next-due
+// time, or zero if it was deleted or is complete (no wake needed).
+func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, due time.Time, completed bool, reason, errMsg string) time.Time {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, err := m.store.GetMonitored(ctx, snapshot.Key)
@@ -232,6 +253,7 @@ func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, d
 	cur.LastError = errMsg
 	if cur.UpdatedAt.Equal(snapshot.UpdatedAt) {
 		cur.DueAt = due
+		cur.DueReason = reason
 		if snapshot.MediaType != "series" {
 			cur.Completed = completed
 		}
@@ -248,36 +270,36 @@ func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, d
 // processMovie pins a released+available movie (marking it Completed) or returns
 // when to look again. completed is true once every requested quality is pinned;
 // the item is kept (not deleted) so the monitor list is a request history.
-func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next time.Time, completed bool, errMsg string) {
+func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next time.Time, completed bool, reason, errMsg string) {
 	now := m.now()
 	release, err := m.meta.MovieReleaseDate(ctx, it.IMDbID, it.TMDbID, now)
 	switch {
 	case errors.Is(err, metadata.ErrNoHomeRelease):
-		return now.Add(m.interval), false, "" // theatrical-only — check again later
+		return now.Add(m.interval), false, store.DueReasonRetry, "" // theatrical-only — check again later
 	case err != nil:
 		m.log.Warn("movie release lookup", "title", it.Title, "error", err)
-		return now.Add(m.interval), false, err.Error()
+		return now.Add(m.interval), false, store.DueReasonRetry, err.Error()
 	case release.After(now):
-		return release, false, "" // wake at release
+		return release, false, store.DueReasonRelease, "" // wake at the real release date
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
 	if m.pinMissing(ctx, targetsForQualities(it, 0, 0), pinned) == 0 {
-		return time.Time{}, true, "" // fully pinned — done, kept for history
+		return time.Time{}, true, store.DueReasonRetry, "" // fully pinned — done, kept for history
 	}
-	return now.Add(m.interval), false, "" // released but no stream yet — retry
+	return now.Add(m.interval), false, store.DueReasonRetry, "" // released but no stream yet — retry
 }
 
 // processSeries pins any aired-but-unpinned episodes and schedules the next wake
 // at the next known airstamp. A series is never completed (it may add seasons).
-func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next time.Time, errMsg string) {
+func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next time.Time, reason, errMsg string) {
 	now := m.now()
 	all, err := m.meta.Episodes(ctx, it.IMDbID)
 	if err != nil {
 		m.log.Warn("series enumerate", "title", it.Title, "error", err)
-		return now.Add(m.interval), err.Error()
+		return now.Add(m.interval), store.DueReasonRetry, err.Error()
 	}
 	if len(it.Seasons) > 0 {
 		all = filterSeasons(all, it.Seasons) // honor a per-season Seerr request
@@ -300,14 +322,14 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next t
 	if remaining > 0 {
 		retry := now.Add(m.interval)
 		if hasNext && nextAir.Before(retry) {
-			return nextAir, ""
+			return nextAir, store.DueReasonAirstamp, ""
 		}
-		return retry, ""
+		return retry, store.DueReasonRetry, ""
 	}
 	if hasNext {
-		return nextAir, "" // all aired episodes pinned — wake near the next airing
+		return nextAir, store.DueReasonAirstamp, "" // all aired episodes pinned — wake near the next airing
 	}
-	return now.Add(m.interval), "" // no known upcoming episode — check again at the ceiling
+	return now.Add(m.interval), store.DueReasonRetry, "" // no known upcoming episode — check again at the ceiling
 }
 
 // pinMissing pins every target not already pinned, returning how many remain

@@ -12,8 +12,8 @@ import (
 
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
+	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/seerr"
-	"github.com/dreulavelle/wisp/internal/silowebhook"
 	"github.com/dreulavelle/wisp/internal/store"
 )
 
@@ -29,7 +29,7 @@ func testApp(t *testing.T) *app {
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil),
 		seerr:   seerr.New("", ""), // unconfigured → Enrich no-ops
-		webhook: silowebhook.New("", "", log),
+		webhook: notify.New(notify.Options{}, log),
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, log) // Run not started → Intake only records
 	return a
