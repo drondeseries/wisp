@@ -1,5 +1,7 @@
 # wisp
 
+![CI](https://github.com/dreulavelle/wisp/actions/workflows/ci.yml/badge.svg)
+
 A resolver-backed virtual filesystem for [AIOStreams](https://github.com/Viren070/AIOStreams).
 
 wisp turns the streams AIOStreams selects into ordinary-looking media files. It
