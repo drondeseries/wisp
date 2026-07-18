@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dreulavelle/wisp/internal/library"
 	"go.etcd.io/bbolt"
 )
 
@@ -165,7 +166,8 @@ func (s *Store) Delete(_ context.Context, virtualPath string) (bool, error) {
 // DeleteByMedia removes every pin matching an IMDb id (and, for series, a
 // season/episode), returning the deleted virtual paths. Use season<=0 to match
 // a movie. A non-empty quality further restricts deletion to that quality tier
-// (case-insensitive), so distinct 1080p/2160p pins can be removed individually.
+// (compared in canonical form), so distinct 1080p/2160p pins can be removed
+// individually.
 func (s *Store) DeleteByMedia(_ context.Context, imdbID string, season, episode int, quality string) ([]string, error) {
 	var deleted []string
 	err := s.db.Update(func(tx *bbolt.Tx) error {
@@ -176,9 +178,12 @@ func (s *Store) DeleteByMedia(_ context.Context, imdbID string, season, episode 
 			if err := json.Unmarshal(v, &p); err != nil {
 				return err
 			}
+			// Normalize the stored label before comparing so a pin saved under a
+			// non-canonical resolution (e.g. "4K" from an older version) still
+			// matches a canonical delete request ("2160p").
 			if p.IMDbID == imdbID &&
 				(season <= 0 || (p.Season == season && p.Episode == episode)) &&
-				(quality == "" || strings.EqualFold(p.Quality, quality)) {
+				(quality == "" || strings.EqualFold(library.NormalizeQuality(p.Quality), quality)) {
 				keys = append(keys, append([]byte(nil), k...))
 				deleted = append(deleted, p.VirtualPath)
 			}

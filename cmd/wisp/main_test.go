@@ -252,3 +252,50 @@ func TestDeletePinRejectsUnknownQuality(t *testing.T) {
 		t.Fatalf("pin count = %d, want 1 (nothing deleted)", n)
 	}
 }
+
+// Adding two qualities of the same episode must yield two coexisting pins — the
+// rename/supersede cleanup must not treat a different tier as a rename.
+func TestHandleAddQualityPinsCoexist(t *testing.T) {
+	backend := wispTestBackend(t)
+	defer backend.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "wisp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	a := &app{
+		store: st, log: slog.New(slog.DiscardHandler),
+		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
+		webhook: silowebhook.New("", "", slog.New(slog.DiscardHandler)),
+	}
+
+	add := func(quality string) int {
+		body, _ := json.Marshal(addRequest{
+			MediaType: "series", IMDbID: "tt7", Title: "Demo", Year: 2026,
+			Season: 1, Episode: 1, Quality: quality, TMDbID: "555", // TMDbID skips Cinemeta
+		})
+		rec := httptest.NewRecorder()
+		a.handleAdd(rec, httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(string(body))))
+		return rec.Code
+	}
+
+	if code := add("1080p"); code != http.StatusOK {
+		t.Fatalf("add 1080p status = %d", code)
+	}
+	if code := add("2160p"); code != http.StatusOK {
+		t.Fatalf("add 2160p status = %d", code)
+	}
+
+	n, _ := st.Count(context.Background())
+	if n != 2 {
+		t.Fatalf("pin count = %d, want 2 (1080p and 2160p coexist)", n)
+	}
+	for _, q := range []string{"1080p", "2160p"} {
+		want := "shows/Demo (2026) [tmdb-555]/Season 01/Demo (2026) - S01E01 - [" + q + "].mkv"
+		if p, _ := st.ByPath(context.Background(), want); p == nil {
+			t.Fatalf("missing %s pin at %q", q, want)
+		}
+	}
+}

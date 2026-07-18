@@ -194,10 +194,15 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 	} else {
 		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, ids, quality, ext)
 	}
+	// A supersede/rename is the *same quality tier* landing at a new path (e.g. a
+	// re-resolve changed the extension). Pins that differ only by quality are
+	// distinct targets and must coexist, so quality is part of the identity here —
+	// otherwise adding 2160p would delete the 1080p pin.
 	existing, _ := a.store.List(r.Context())
 	var renamed []store.Pin
 	for _, old := range existing {
-		if old.IMDbID == req.IMDbID && old.Season == req.Season && old.Episode == req.Episode && old.VirtualPath != vpath {
+		if old.IMDbID == req.IMDbID && old.Season == req.Season && old.Episode == req.Episode &&
+			strings.EqualFold(old.Quality, quality) && old.VirtualPath != vpath {
 			renamed = append(renamed, old)
 		}
 	}
@@ -464,7 +469,9 @@ func writeAddError(w http.ResponseWriter, log *slog.Logger, req addRequest, err 
 		case aiostreams.KindRateLimited:
 			status, code, message = http.StatusTooManyRequests, "rate_limited", "AIOStreams rate limited; retry later"
 			if se.RetryAfter > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(int(se.RetryAfter.Seconds())))
+				// Round up so a sub-second remainder never advises retrying early.
+				secs := int((se.RetryAfter + time.Second - 1) / time.Second)
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
 			}
 		default:
 			status, code, message = http.StatusServiceUnavailable, "upstream_unavailable", "AIOStreams temporarily unavailable"

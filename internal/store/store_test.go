@@ -165,3 +165,20 @@ func TestDeleteByMediaQualityFilter(t *testing.T) {
 		t.Fatal("1080p pin should remain")
 	}
 }
+
+// A pin saved under a non-canonical label ("4K", e.g. from an older version)
+// must still be removable by its canonical quality ("2160p").
+func TestDeleteByMediaNormalizesStoredLabel(t *testing.T) {
+	ctx := context.Background()
+	st := open(t)
+	if err := st.Upsert(ctx, Pin{
+		IMDbID: "tt4", MediaType: "movie", Quality: "4K",
+		VirtualPath: "movies/Old (2020) - [4K].mkv",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := st.DeleteByMedia(ctx, "tt4", 0, 0, "2160p")
+	if err != nil || len(deleted) != 1 {
+		t.Fatalf("delete = %v (err %v), want the 4K pin matched by 2160p", deleted, err)
+	}
+}
