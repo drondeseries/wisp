@@ -10,6 +10,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -32,12 +33,30 @@ type Server struct {
 	log       *slog.Logger
 }
 
-// New builds a file server.
+// New builds a file server. The upstream client has no overall timeout — media
+// bodies stream for the length of playback — but bounds the parts that must be
+// fast (connect, TLS, waiting for response headers) so a dead upstream fails
+// quickly instead of hanging a player. Connection pooling keeps concurrent
+// range reads (rclone prefetch, multiple viewers) responsive.
 func New(st *store.Store, reresolve ReResolve, log *slog.Logger) *Server {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 	return &Server{
 		store:     st,
 		reresolve: reresolve,
-		client:    &http.Client{Timeout: 0}, // streaming; no whole-body deadline
+		client:    &http.Client{Transport: transport},
 		log:       log,
 	}
 }
@@ -117,13 +136,15 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 }
 
 // proxyOnce streams the upstream once. ok reports success (response written);
-// retriable reports whether a re-resolve is worth attempting. Once any bytes
-// (or headers) have been written to w, retriable is false.
+// retriable reports whether a re-resolve is worth attempting. Once headers have
+// been written to w, retriable is false — the response is already committed.
+//
+// The request rides the client's context (the player's connection); there is no
+// artificial body deadline, so playback and long seeks are never truncated.
+// Stuck upstreams are caught by the transport's connect/header timeouts.
 func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pin) (ok, retriable bool) {
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pin.SourceURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, pin.SourceURL, nil)
 	if err != nil {
-		cancel()
 		return false, false
 	}
 	req.Header.Set("User-Agent", "wisp")
@@ -132,13 +153,12 @@ func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		cancel()
-		return false, true
+		// Client gone: don't burn a re-resolve on a cancelled request.
+		return false, r.Context().Err() == nil
 	}
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone ||
 		resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
 		resp.Body.Close()
-		cancel()
 		return false, true
 	}
 	// Commit: mirror upstream status and content headers, then stream.
@@ -152,7 +172,6 @@ func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	w.WriteHeader(resp.StatusCode)
 	_, copyErr := io.Copy(w, resp.Body)
 	resp.Body.Close()
-	cancel()
 	if copyErr != nil {
 		s.log.Debug("client stream ended", "path", pin.VirtualPath, "error", copyErr)
 	}

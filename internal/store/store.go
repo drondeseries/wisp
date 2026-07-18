@@ -96,13 +96,25 @@ func (s *Store) UpdateResolution(ctx context.Context, id int64, sourceURL string
 
 // Children returns the immediate directory and file names under a virtual
 // directory prefix (empty prefix = library root). dirs end without a slash.
+//
+// The subtree is selected with an index range scan rather than a full table
+// scan: every descendant of "p" sorts in [p+"/", p+"0") because '/' (0x2f)
+// immediately precedes '0' (0x30), so the UNIQUE index on virtual_path does
+// the narrowing.
 func (s *Store) Children(ctx context.Context, prefix string) (dirs, files []string, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT virtual_path FROM pins`)
+	prefix = strings.Trim(prefix, "/")
+	var rows *sql.Rows
+	if prefix == "" {
+		rows, err = s.db.QueryContext(ctx, `SELECT virtual_path FROM pins ORDER BY virtual_path`)
+	} else {
+		lo, hi := prefix+"/", prefix+"0"
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT virtual_path FROM pins WHERE virtual_path >= ? AND virtual_path < ? ORDER BY virtual_path`, lo, hi)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
-	prefix = strings.Trim(prefix, "/")
 	seenDir := map[string]bool{}
 	seenFile := map[string]bool{}
 	for rows.Next() {
@@ -112,9 +124,6 @@ func (s *Store) Children(ctx context.Context, prefix string) (dirs, files []stri
 		}
 		rest := vp
 		if prefix != "" {
-			if !strings.HasPrefix(vp, prefix+"/") {
-				continue
-			}
 			rest = strings.TrimPrefix(vp, prefix+"/")
 		}
 		if rest == "" {
