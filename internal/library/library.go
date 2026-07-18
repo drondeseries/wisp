@@ -7,6 +7,72 @@ import (
 	"strings"
 )
 
+// The four library roots wisp presents, one per Silo library. A title's root is
+// fixed by its category (media type × is-anime) at first intake and is part of
+// every VirtualPath (the bbolt key and on-disk location), so it must never be
+// re-derived for an existing title — see internal/monitor for the invariant.
+const (
+	RootMovies      = "movies"
+	RootShows       = "shows"
+	RootAnimeMovies = "anime_movies"
+	RootAnimeShows  = "anime_shows"
+)
+
+// Roots returns the four library roots wisp always presents (even when empty),
+// so a media server can validate all four library paths from an empty wisp.
+func Roots() []string {
+	return []string{RootAnimeMovies, RootAnimeShows, RootMovies, RootShows}
+}
+
+// Root maps a category (media type × is-anime) to the library root that holds
+// it. This is the single source of truth the path builder and the always-present
+// directory listing share.
+func Root(mediaType string, isAnime bool) string {
+	series := mediaType == "series"
+	switch {
+	case series && isAnime:
+		return RootAnimeShows
+	case series:
+		return RootShows
+	case isAnime:
+		return RootAnimeMovies
+	default:
+		return RootMovies
+	}
+}
+
+// IsRoot reports whether name is one of the four library roots.
+func IsRoot(name string) bool {
+	switch name {
+	case RootMovies, RootShows, RootAnimeMovies, RootAnimeShows:
+		return true
+	}
+	return false
+}
+
+// RootOf returns the library root a virtual path lives under, or "" when the
+// path is not under a known root. Used to backfill a pin's category from its
+// existing VirtualPath prefix without rewriting the path.
+func RootOf(virtualPath string) string {
+	vp := strings.TrimLeft(virtualPath, "/")
+	if i := strings.IndexByte(vp, '/'); i >= 0 {
+		vp = vp[:i]
+	}
+	if IsRoot(vp) {
+		return vp
+	}
+	return ""
+}
+
+// MediaTypeForRoot returns "series" for the two show roots and "movie"
+// otherwise, so callers that only have a path/root can classify it.
+func MediaTypeForRoot(root string) string {
+	if root == RootShows || root == RootAnimeShows {
+		return "series"
+	}
+	return "movie"
+}
+
 // IDs carries provider identifiers used to tag folder names, so scanners match
 // a title deterministically by ID instead of guessing from the title text.
 // Silo/Plex/Jellyfin all read tags like "[tvdb-439755]" / "[tmdb-27205]" /
@@ -45,19 +111,29 @@ func (ids IDs) tag(mediaType string) string {
 
 // MoviePath returns the virtual path for a movie shortcut, mirroring the
 // naming a Silo/Plex/Jellyfin scanner expects, with a provider-id folder tag.
-func MoviePath(title string, year int, ids IDs, quality, ext string) string {
+// root is the movie library root the title's category resolved to (RootMovies
+// or RootAnimeMovies); an empty root falls back to RootMovies.
+func MoviePath(root, title string, year int, ids IDs, quality, ext string) string {
+	if root == "" {
+		root = RootMovies
+	}
 	folder := fmt.Sprintf("%s (%d)", sanitize(title), year) + ids.tag("movie")
 	file := fmt.Sprintf("%s (%d) - [%s]%s", sanitize(title), year, quality, ext)
-	return path.Join("movies", folder, file)
+	return path.Join(root, folder, file)
 }
 
 // EpisodePath returns the virtual path for a series episode shortcut. The
-// provider-id tag lives on the series folder (not the season folder).
-func EpisodePath(title string, year, season, episode int, ids IDs, quality, ext string) string {
+// provider-id tag lives on the series folder (not the season folder). root is
+// the series library root the title's category resolved to (RootShows or
+// RootAnimeShows); an empty root falls back to RootShows.
+func EpisodePath(root, title string, year, season, episode int, ids IDs, quality, ext string) string {
+	if root == "" {
+		root = RootShows
+	}
 	folder := fmt.Sprintf("%s (%d)", sanitize(title), year) + ids.tag("series")
 	seasonDir := fmt.Sprintf("Season %02d", season)
 	file := fmt.Sprintf("%s (%d) - S%02dE%02d - [%s]%s", sanitize(title), year, season, episode, quality, ext)
-	return path.Join("shows", folder, seasonDir, file)
+	return path.Join(root, folder, seasonDir, file)
 }
 
 // sanitizeID keeps only the word characters Silo's folder-id pattern accepts.

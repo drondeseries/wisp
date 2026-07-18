@@ -45,6 +45,14 @@ func main() {
 	defer st.Close()
 	warnDBPersistence(cfg.DBPath, log)
 
+	// Additive, idempotent migration: stamp a Category on pins/monitors that
+	// predate the field, from their existing paths. Never rewrites VirtualPaths.
+	if n, err := st.BackfillCategories(context.Background()); err != nil {
+		log.Warn("category backfill", "error", err)
+	} else if n > 0 {
+		log.Info("category backfill", "records_updated", n)
+	}
+
 	notifier := notify.New(notify.Options{
 		ArrWebhookURL:  cfg.NotifyArrWebhookURL,
 		SiloWebhookURL: cfg.SiloWebhookURL,
@@ -89,6 +97,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
 	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
 	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
+	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -186,13 +195,64 @@ type app struct {
 type addRequest struct {
 	MediaType string `json:"media_type"` // "movie" | "series"
 	IMDbID    string `json:"imdb_id"`
-	Title     string `json:"title"`
-	Year      int    `json:"year"`
-	Season    int    `json:"season"`
-	Episode   int    `json:"episode"`
-	Quality   string `json:"quality"`
 	TMDbID    string `json:"tmdb_id"`
 	TVDbID    string `json:"tvdb_id"`
+	Title     string `json:"title"`
+	Year      int    `json:"year"`
+
+	// Legacy direct-pin fields: resolve and pin one file synchronously.
+	Season  int    `json:"season"`
+	Episode int    `json:"episode"`
+	Quality string `json:"quality"`
+
+	// Request-shaped intake fields: register/update a monitor (the async path the
+	// Silo plugin shim calls). Their presence routes the request to intake.
+	// Qualities is a pointer so a present-but-empty `"qualities": []` (meaning
+	// "best available") is distinguishable from an absent field.
+	IsAnime    *bool          `json:"is_anime"`
+	Qualities  *[]qualitySpec `json:"qualities"`
+	RequestRef string         `json:"request_ref"`
+}
+
+// qualitySpec is one requested tier in a request-shaped add. id is a resolution
+// label ("1080p"|"2160p"); is4k is a fallback hint when id is absent.
+type qualitySpec struct {
+	ID   string `json:"id"`
+	Is4K bool   `json:"is4k"`
+}
+
+// isRequestShaped reports whether the body uses the request-shaped intake
+// contract rather than a legacy direct-pin. The presence of the `qualities`
+// field (even as an empty array), `request_ref`, `is_anime`, or a tmdb-only
+// identity the legacy synchronous path can't pin all mark a request. Existing
+// simpler payloads (imdb + season/episode/quality) fall through to the legacy
+// path unchanged.
+func (r addRequest) isRequestShaped() bool {
+	return r.Qualities != nil || r.RequestRef != "" || r.IsAnime != nil ||
+		(r.IMDbID == "" && r.TMDbID != "")
+}
+
+// qualities maps the request-shaped tiers to wisp's canonical quality labels,
+// deduped and order-preserving. An absent or empty field yields no tiers ("best
+// available"). An unrecognized id falls back to 2160p when its is4k hint is set;
+// otherwise it is dropped.
+func (r addRequest) qualities() []string {
+	if r.Qualities == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, q := range *r.Qualities {
+		label := library.NormalizeQuality(q.ID)
+		if label == "" && q.Is4K {
+			label = "2160p"
+		}
+		if label != "" && !seen[label] {
+			seen[label] = true
+			out = append(out, label)
+		}
+	}
+	return out
 }
 
 func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +265,11 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media_type must be movie or series", http.StatusBadRequest)
 		return
 	}
+	if req.isRequestShaped() {
+		a.handleAddRequest(w, r, req)
+		return
+	}
+	// Legacy synchronous direct-pin path: resolve and pin one file now.
 	if req.IMDbID == "" || req.Title == "" {
 		http.Error(w, "imdb_id and title are required", http.StatusBadRequest)
 		return
@@ -221,6 +286,28 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"virtual_path": vpath, "size": size})
 }
 
+// handleAddRequest registers/updates a monitor from a request-shaped body and
+// returns immediately (202). It never resolves synchronously — the scheduler
+// does enumeration, release gating, and stream resolution. Idempotent per title:
+// re-posting extends the existing monitor rather than duplicating it.
+func (a *app) handleAddRequest(w http.ResponseWriter, r *http.Request, req addRequest) {
+	if req.IMDbID == "" && req.TMDbID == "" {
+		http.Error(w, "imdb_id or tmdb_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := a.mon.Intake(r.Context(), monitor.Request{
+		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
+		Title: req.Title, Year: req.Year, Qualities: req.qualities(),
+		IsAnime: req.IsAnime, RequestRef: req.RequestRef,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"monitoring": true, "state": statusQueued})
+}
+
 // pinSpec is one resolve+pin request, shared by the API and the monitor.
 type pinSpec struct {
 	MediaType string
@@ -232,6 +319,11 @@ type pinSpec struct {
 	Season    int
 	Episode   int
 	Quality   string
+	// Category is the library root the title resolved to (library.Root*). The
+	// monitor supplies it (decided once at intake); the legacy direct-pin path
+	// leaves it empty and pin() inherits it from an existing pin/monitor, else
+	// defaults to non-anime — never re-deriving an existing title's root.
+	Category string
 }
 
 // pin resolves a stream via AIOStreams and records the pin, superseding a
@@ -257,14 +349,21 @@ func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err
 		tvdb, tmdb := metadata.ProviderIDs(ctx, s.MediaType, searchID)
 		ids.TVDb, ids.TMDb = tvdb, tmdb
 	}
+	// The category (library root) is decided once per title and inherited by all
+	// its pins; never re-derive it — the root is part of VirtualPath (the key).
+	root := s.Category
+	if root == "" {
+		root = a.inheritCategory(ctx, searchID, s.MediaType)
+	}
 	ext := library.Ext(filename)
 	if s.MediaType == "movie" {
-		vpath = library.MoviePath(s.Title, s.Year, ids, quality, ext)
+		vpath = library.MoviePath(root, s.Title, s.Year, ids, quality, ext)
 	} else {
-		vpath = library.EpisodePath(s.Title, s.Year, s.Season, s.Episode, ids, quality, ext)
+		vpath = library.EpisodePath(root, s.Title, s.Year, s.Season, s.Episode, ids, quality, ext)
 	}
 	pin := store.Pin{
-		MediaType: s.MediaType, IMDbID: searchID, Season: s.Season, Episode: s.Episode,
+		MediaType: s.MediaType, IMDbID: searchID, TMDbID: ids.TMDb, TVDbID: ids.TVDb,
+		Category: root, Season: s.Season, Episode: s.Episode,
 		Title: s.Title, Year: s.Year, Quality: quality, VirtualPath: vpath,
 		SourceURL: sourceURL, Size: size, ResolvedAt: time.Now(),
 	}
@@ -367,11 +466,31 @@ func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func mediaTypeForPath(virtualPath string) string {
-	if strings.HasPrefix(strings.TrimLeft(virtualPath, "/"), "shows/") {
-		return "series"
+// inheritCategory returns the library root a title's pins already use — from an
+// existing pin, else the title's monitor — so a legacy direct pin lands under
+// the same root the title was first categorized into (first-writer-wins). It
+// falls back to the non-anime root for the media type when nothing is known,
+// preserving the pre-category layout for brand-new direct adds.
+func (a *app) inheritCategory(ctx context.Context, searchID, mediaType string) string {
+	if pins, err := a.store.PinsByMedia(ctx, searchID); err == nil {
+		for _, p := range pins {
+			if p.Category != "" {
+				return p.Category
+			}
+			if root := library.RootOf(p.VirtualPath); root != "" {
+				return root
+			}
+		}
 	}
-	return "movie"
+	// monitorKey mirrors the monitor package: mediaType + ":" + searchID.
+	if mon, err := a.store.GetMonitored(ctx, mediaType+":"+searchID); err == nil && mon != nil && mon.Category != "" {
+		return mon.Category
+	}
+	return library.Root(mediaType, false)
+}
+
+func mediaTypeForPath(virtualPath string) string {
+	return library.MediaTypeForRoot(library.RootOf(virtualPath))
 }
 
 func (a *app) deletePin(ctx context.Context, path string) (bool, error) {

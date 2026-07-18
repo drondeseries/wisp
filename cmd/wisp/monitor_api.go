@@ -20,6 +20,7 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (bool, error) {
 	_, _, err := a.pin(ctx, pinSpec{
 		MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: t.TMDbID, TVDbID: t.TVDbID,
 		Title: t.Title, Year: t.Year, Season: t.Season, Episode: t.Episode, Quality: t.Quality,
+		Category: t.Category,
 	})
 	if err == nil {
 		return true, nil

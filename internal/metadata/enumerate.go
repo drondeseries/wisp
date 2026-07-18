@@ -2,11 +2,18 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 )
+
+// ErrIMDbRequired means a series cannot be enumerated because it has no IMDb id
+// (Cinemeta's canonical numbering is imdb-keyed). It is a permanent identity
+// failure, distinct from a transient provider error, so the scheduler can mark
+// the title failed rather than retry forever.
+var ErrIMDbRequired = errors.New("metadata: imdb id required to enumerate episodes")
 
 // airDateTolerance bounds how far a TVmaze airstamp may sit from Cinemeta's
 // canonical date and still be trusted as the same episode. A genuine match
@@ -21,7 +28,7 @@ const airDateTolerance = 48 * time.Hour
 // only if Cinemeta yields nothing.
 func (s *Service) Episodes(ctx context.Context, imdbID string) ([]Episode, error) {
 	if !strings.HasPrefix(strings.TrimSpace(imdbID), "tt") {
-		return nil, fmt.Errorf("metadata: imdb id required to enumerate episodes")
+		return nil, ErrIMDbRequired
 	}
 	canonical, cErr := s.cinemetaEpisodes(ctx, imdbID)
 	tvmaze, tErr := s.tvmazeEpisodes(ctx, imdbID)

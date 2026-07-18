@@ -39,6 +39,23 @@ type Monitored struct {
 	DueAt     time.Time // earliest time worth re-checking (release or next air)
 	DueReason string    // why DueAt was set — one of the DueReason* constants
 
+	// Category is the library root this title resolved to (library.Root*). It is
+	// decided ONCE at first intake (explicit is_anime flag, else a metadata
+	// heuristic), stored here, inherited by every pin, and NEVER re-derived — the
+	// root is part of each pin's VirtualPath, so re-deriving would orphan files.
+	Category string
+	// RequestRef is an opaque caller key (e.g. a Silo request id) echoed back on
+	// the status API; wisp never interprets it.
+	RequestRef string
+	// PendingAired is the scheduler's last count of aired-but-unpinned episodes
+	// for a series (0 = caught up). It lets the status API report series
+	// completion without a network call. Meaningless for movies.
+	PendingAired int
+	// Failed marks a permanent give-up (unresolvable identity). wisp otherwise
+	// retries indefinitely, so this is rare by design; it is never set for an
+	// unreleased/unaired title.
+	Failed bool
+
 	// Observability / control (kept-and-marked so the monitor list doubles as a
 	// request history — idea from drondeseries's PR #5).
 	Enabled     bool      // false = paused; kept but not refreshed
@@ -48,6 +65,19 @@ type Monitored struct {
 
 	AddedAt   time.Time
 	UpdatedAt time.Time
+}
+
+// monitoredSearchID is the id an item's pins are stored under — imdb if known,
+// else "tmdb:<id>" — so category backfill and dedupe lookups match how pins are
+// keyed. It mirrors the same helper in the monitor/main packages.
+func monitoredSearchID(m Monitored) string {
+	if m.IMDbID != "" {
+		return m.IMDbID
+	}
+	if m.TMDbID != "" {
+		return "tmdb:" + m.TMDbID
+	}
+	return ""
 }
 
 // PutMonitored inserts or replaces a monitored item by its key.

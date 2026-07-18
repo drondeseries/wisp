@@ -28,8 +28,9 @@ owns release scheduling, stream resolution, and the virtual library.
 - **Monitor.** wisp keeps a persistent watchlist and pins unreleased movies and
   newly-aired episodes as they land — waking near the next airstamp, not polling
   blindly. (Or feed it directly via the [API](#api); Seerr is optional.)
-- **Mount.** wisp self-mounts with embedded rclone; pins appear in a normal
-  `movies/` and `shows/` layout that any media server scans.
+- **Mount.** wisp self-mounts with embedded rclone; pins appear under four
+  category roots — `movies/`, `shows/`, `anime_movies/`, `anime_shows/` — that
+  any media server scans (see [Library layout](#library-layout)).
 - **Play.** On open, wisp range-proxies bytes from the pinned stream, which
   re-unlocks the debrid link on every request. If a link has died, wisp
   re-resolves through AIOStreams and playback self-heals.
@@ -37,6 +38,40 @@ owns release scheduling, stream resolution, and the virtual library.
 Because the files carry real bytes, the media server reads real metadata
 (codecs, duration, subtitles) and owns playback end to end — direct play,
 transcode, and seeking all work.
+
+## Library layout
+
+wisp presents four category roots under the mount, and always shows all four —
+even when empty, so a media server can validate every library path from a fresh
+install:
+
+```
+/mnt/wisp/
+├── movies/          # non-anime movies
+├── shows/           # non-anime series
+├── anime_movies/    # anime movies
+└── anime_shows/     # anime series
+```
+
+Point Silo at all four (one library per root). A title's category is decided
+**once** and is then permanent — it is stored on the title and on every pin, and
+never re-derived (the root is part of each file's path, so moving it would orphan
+the on-disk files). Re-categorizing an existing title is out of scope for now; a
+conflicting later request keeps the first category and logs a warning.
+
+**How anime is decided (in order):**
+
+- If the title already has pins, their existing root is inherited (first writer
+  wins — a later flag never splits a title across roots).
+- An explicit `is_anime` flag on the request wins next (e.g. from a Silo
+  request); this is resolved immediately, so `/api/add` never blocks.
+- Otherwise, when the flag is omitted, the category is resolved by the scheduler
+  on its first pass — *before anything is pinned* — using a small, conservative
+  heuristic over the Cinemeta metadata wisp already fetches: it requires the
+  **Animation** genre **and** a Japanese original language/country. Western
+  animation and any title without a Japanese signal stay non-anime. Deferring
+  this off the intake path keeps `/api/add` fast.
+- If no signal is available, the title defaults to non-anime.
 
 ## Quick start
 
@@ -192,6 +227,51 @@ Add failures carry a JSON `error` code so a feeder can tell "no stream yet" from
 a misconfiguration: `502 no_streams` / `502 no_quality_match` (keep monitoring),
 `500 aiostreams_auth` (bad credentials), `429 rate_limited` (throttled; honors
 `Retry-After`), `503 upstream_unavailable` (transient).
+
+#### Request-shaped add (async intake)
+
+`POST /api/add` also accepts a **request-shaped** body that registers/updates a
+monitor instead of pinning synchronously. wisp's scheduler then does enumeration,
+release gating, and resolution in the background; the call returns `202` fast.
+This is the contract a Silo plugin shim uses.
+
+```sh
+curl -X POST http://localhost:8080/api/add -d '{
+  "media_type": "movie",
+  "tmdb_id": "27205",
+  "imdb_id": "tt1375666",
+  "title": "Inception",
+  "year": 2010,
+  "is_anime": false,
+  "qualities": [{"id": "1080p"}, {"id": "2160p", "is4k": true}],
+  "request_ref": "silo-req-42"
+}'
+```
+
+- `is_anime` (optional) fixes the category; omit it to let the heuristic decide
+  (see [Library layout](#library-layout)).
+- `qualities` (optional) is a list of `{id, is4k}` tiers; omit for best-available.
+- `request_ref` (optional) is an opaque caller key echoed back by the status API.
+- A body with `qualities`, `request_ref`, `is_anime`, or a tmdb-only identity is
+  treated as request-shaped; the simpler `imdb_id` + `season`/`episode`/`quality`
+  payload above still pins synchronously as before.
+
+#### Request status
+
+`GET /api/requests/status?media_type=&tmdb_id=` (falling back to `imdb_id`)
+returns wisp's authoritative state for a title, for a request router to poll:
+
+```json
+{ "state": "queued", "pinned_qualities": ["1080p"], "detail": "awaiting home-media release" }
+```
+
+- `queued` — tracked, nothing in scope pinned yet (unreleased/unaired, or the
+  released-but-no-stream-yet retry window). Unreleased is never `failed`.
+- `completed` — requested scope pinned and servable (movie: a pin exists; series:
+  every currently-aired episode is pinned — the monitor keeps running for future
+  episodes but still reports `completed`).
+- `failed` — permanent give-up only (unresolvable identity). wisp otherwise
+  retries indefinitely. A `404` means wisp is not tracking the title.
 
 List pins: `GET /api/pins`. Status: `GET /api/status`.
 

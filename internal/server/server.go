@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/store"
 )
 
@@ -179,7 +180,15 @@ func (s *Server) serveDir(w http.ResponseWriter, r *http.Request, rel string) {
 		http.Error(w, "listing failed", http.StatusInternalServerError)
 		return
 	}
-	if rel != "" && len(dirs) == 0 && len(files) == 0 {
+	// The four library roots are always present, even on an empty wisp, so a media
+	// server can validate every library path from boot. Merge them into the root
+	// listing, and never 404 a root directory itself (only deeper empty paths).
+	switch {
+	case rel == "":
+		dirs = mergeRoots(dirs)
+	case library.IsRoot(rel):
+		// a real but empty root: fall through to render an empty listing
+	case len(dirs) == 0 && len(files) == 0:
 		http.NotFound(w, r)
 		return
 	}
@@ -312,6 +321,23 @@ func copyHeader(dst, src http.Header, keys ...string) {
 			dst.Set(k, v)
 		}
 	}
+}
+
+// mergeRoots unions the pinned top-level dirs with the four always-present
+// library roots, deduped. The roots share library.Roots() with the path builder
+// so the listing can never disagree with where pins are written.
+func mergeRoots(dirs []string) []string {
+	seen := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		seen[d] = true
+	}
+	for _, root := range library.Roots() {
+		if !seen[root] {
+			seen[root] = true
+			dirs = append(dirs, root)
+		}
+	}
+	return dirs
 }
 
 func cleanPath(p string) string {

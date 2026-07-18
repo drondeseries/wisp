@@ -42,10 +42,11 @@ type Target struct {
 	Season    int
 	Episode   int
 	Quality   string
+	Category  string // library root decided for the title; inherited by the pin
 }
 
-// Request is an intake from a feeder (Seerr): a movie or a whole series, at zero
-// or more requested quality tiers.
+// Request is an intake from a feeder (Seerr, the request-shaped API): a movie or
+// a whole series, at zero or more requested quality tiers.
 type Request struct {
 	MediaType string
 	IMDbID    string
@@ -55,6 +56,13 @@ type Request struct {
 	Year      int
 	Qualities []string
 	Seasons   []int // series: requested seasons; empty = all
+	// IsAnime, when non-nil, is the authoritative anime flag (e.g. from a Silo
+	// request). When nil, the category is derived from a metadata heuristic. It is
+	// consulted only at first intake for a title.
+	IsAnime *bool
+	// RequestRef is an opaque caller key (e.g. a Silo request id) stored on the
+	// monitor and echoed by the status API; wisp never interprets it.
+	RequestRef string
 }
 
 // Fulfiller resolves+pins targets and reports what is already pinned. The app
@@ -130,34 +138,121 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 	if r.MediaType == "movie" && r.IMDbID == "" && (r.TMDbID == "" || !m.meta.HasTMDB()) {
 		return fmt.Errorf("movie intake needs an imdb id or a tmdb id with WISP_TMDB_API_KEY set (no way to gate release otherwise)")
 	}
+	key := monitorKey(r.MediaType, r.IMDbID, r.TMDbID)
+	searchID := requestSearchID(r)
+
 	item := store.Monitored{
-		Key: monitorKey(r.MediaType, r.IMDbID, r.TMDbID), MediaType: r.MediaType,
+		Key: key, MediaType: r.MediaType,
 		IMDbID: r.IMDbID, TMDbID: r.TMDbID, TVDbID: r.TVDbID, Title: r.Title,
 		Year: r.Year, Qualities: r.Qualities, Seasons: r.Seasons, DueAt: m.now(),
-		Enabled: true,
+		Enabled: true, RequestRef: r.RequestRef,
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Decide the category ONCE per title, using only store reads so /api/add never
+	// blocks on the network (no synchronous heuristic here). Priority, all
+	// first-writer-wins:
+	//   1. an existing monitor's category,
+	//   2. the category any existing pin already implies (legacy/direct pins),
+	//   3. the explicit is_anime flag.
+	// With none of those, the category is left empty and the scheduler resolves it
+	// (via the heuristic) on its first pass, before any pin path is built.
+	cur, _ := m.store.GetMonitored(ctx, item.Key)
+	category := ""
+	if cur != nil {
+		category = cur.Category
+	}
+	if category == "" {
+		category = m.store.CategoryForMedia(ctx, searchID, r.TMDbID)
+	}
+	switch {
+	case category == "" && r.IsAnime != nil:
+		category = library.Root(r.MediaType, *r.IsAnime)
+	case category != "" && r.IsAnime != nil:
+		// A later, conflicting explicit flag never moves an already-categorized
+		// title (its pins already live under the stored root).
+		if want := library.Root(r.MediaType, *r.IsAnime); want != category {
+			m.log.Warn("category conflict; keeping first-intake category",
+				"key", key, "stored", category, "requested", want)
+		}
+	}
+	item.Category = category
+
 	// A later request for the same title extends the existing monitor (e.g. a new
 	// season, or a 4K request on top of HD) rather than replacing it. A request
 	// that scopes no seasons widens coverage to all seasons. Re-requesting resets
-	// DueAt to now and clears Completed so the new work is picked up.
-	if existing, _ := m.store.GetMonitored(ctx, item.Key); existing != nil {
-		item.AddedAt = existing.AddedAt
-		item.Qualities = unionStrings(existing.Qualities, r.Qualities)
-		if len(existing.Seasons) == 0 || len(r.Seasons) == 0 {
+	// DueAt to now and clears Completed/Failed so the new work is picked up.
+	if cur != nil {
+		item.AddedAt = cur.AddedAt
+		item.Qualities = unionStrings(cur.Qualities, r.Qualities)
+		if len(cur.Seasons) == 0 || len(r.Seasons) == 0 {
 			item.Seasons = nil // one unscoped request means "all seasons"
 		} else {
-			item.Seasons = unionInts(existing.Seasons, r.Seasons)
+			item.Seasons = unionInts(cur.Seasons, r.Seasons)
+		}
+		if r.RequestRef == "" {
+			item.RequestRef = cur.RequestRef // don't blank an existing ref
 		}
 	}
-	err := m.store.PutMonitored(ctx, item)
-	m.mu.Unlock()
-	if err != nil {
+	if err := m.store.PutMonitored(ctx, item); err != nil {
 		return err
 	}
-	m.log.Info("monitoring", "key", item.Key, "title", item.Title)
+	m.log.Info("monitoring", "key", item.Key, "title", item.Title, "category", item.Category)
 	m.Wake()
 	return nil
+}
+
+// ensureCategory resolves and persists a deferred category before any pin path
+// is built. It runs on the scheduler (the heuristic here is a network call, kept
+// off the /api/add path), and re-checks existing pins first so a title that
+// gained legacy/direct pins inherits their root rather than re-deciding. Returns
+// the item to process — the freshly-persisted record when a category was set, so
+// persistResult's concurrency check still lines up.
+func (m *Monitor) ensureCategory(ctx context.Context, it store.Monitored) store.Monitored {
+	if it.Category != "" {
+		return it
+	}
+	// Resolve outside the lock (may hit the network); persist under it.
+	category := m.store.CategoryForMedia(ctx, monitoredSearchID(it), it.TMDbID)
+	if category == "" {
+		isAnime := false
+		if it.IMDbID != "" {
+			isAnime = m.meta.AnimeHeuristic(ctx, it.MediaType, it.IMDbID)
+		}
+		category = library.Root(it.MediaType, isAnime)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fresh, err := m.store.GetMonitored(ctx, it.Key)
+	if err != nil || fresh == nil {
+		return it // deleted concurrently
+	}
+	if fresh.Category != "" {
+		return *fresh // a concurrent writer won the race — first-writer-wins
+	}
+	fresh.Category = category
+	if e := m.store.PutMonitored(ctx, *fresh); e != nil {
+		m.log.Warn("persist category", "key", fresh.Key, "error", e)
+		return it
+	}
+	updated, _ := m.store.GetMonitored(ctx, it.Key)
+	if updated != nil {
+		return *updated
+	}
+	return it
+}
+
+// requestSearchID is the id a request's pins are keyed under — imdb if known,
+// else "tmdb:<id>" — matching how app.pin stores them.
+func requestSearchID(r Request) string {
+	if r.IMDbID != "" {
+		return r.IMDbID
+	}
+	if r.TMDbID != "" {
+		return "tmdb:" + r.TMDbID
+	}
+	return ""
 }
 
 // Run drives the scheduler until ctx is cancelled.
@@ -194,6 +289,17 @@ func (m *Monitor) Wake() {
 	}
 }
 
+// passResult is the outcome of one scheduler pass over a monitored item, folded
+// back into the stored record by persistResult.
+type passResult struct {
+	due          time.Time // next time worth re-checking
+	completed    bool      // movie: every requested quality pinned
+	reason       string    // one of the store.DueReason* constants
+	errMsg       string    // last non-fatal error (surfaced in the API)
+	pendingAired int       // series: aired-but-unpinned episodes this pass (0 = caught up)
+	failed       bool      // permanent give-up (unresolvable identity)
+}
+
 // checkDue processes every due item and returns the earliest next-due time
 // across all remaining items (zero if none).
 func (m *Monitor) checkDue(ctx context.Context) time.Time {
@@ -205,8 +311,8 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 	now := m.now()
 	var earliest time.Time
 	for _, it := range items {
-		if !it.Enabled || it.Completed {
-			continue // paused, or a fully-pinned movie kept for history
+		if !it.Enabled || it.Completed || it.Failed {
+			continue // paused, a fully-pinned movie kept for history, or given up
 		}
 		if it.DueAt.After(now) {
 			if earliest.IsZero() || it.DueAt.Before(earliest) {
@@ -214,21 +320,19 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 			}
 			continue // not due yet
 		}
+		// Resolve a deferred category before any pin path is built. This is where
+		// the (network) heuristic runs — never on the /api/add intake path.
+		it = m.ensureCategory(ctx, it)
 		// Process outside the lock (it's network-bound); persistResult then folds
 		// the result into the current record without clobbering a concurrent
 		// Intake or delete.
-		var (
-			due       time.Time
-			completed bool
-			reason    string
-			errMsg    string
-		)
+		var res passResult
 		if it.MediaType == "series" {
-			due, reason, errMsg = m.processSeries(ctx, it)
+			res = m.processSeries(ctx, it)
 		} else {
-			due, completed, reason, errMsg = m.processMovie(ctx, it)
+			res = m.processMovie(ctx, it)
 		}
-		if effective := m.persistResult(ctx, it, due, completed, reason, errMsg); !effective.IsZero() {
+		if effective := m.persistResult(ctx, it, res); !effective.IsZero() {
 			if earliest.IsZero() || effective.Before(earliest) {
 				earliest = effective
 			}
@@ -242,7 +346,7 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 // item since our snapshot (UpdatedAt differs), its DueAt/DueReason/Completed win
 // — we only record LastChecked/LastError. Returns the item's effective next-due
 // time, or zero if it was deleted or is complete (no wake needed).
-func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, due time.Time, completed bool, reason, errMsg string) time.Time {
+func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, res passResult) time.Time {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, err := m.store.GetMonitored(ctx, snapshot.Key)
@@ -250,18 +354,21 @@ func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, d
 		return time.Time{} // deleted concurrently — drop
 	}
 	cur.LastChecked = m.now()
-	cur.LastError = errMsg
+	cur.LastError = res.errMsg
 	if cur.UpdatedAt.Equal(snapshot.UpdatedAt) {
-		cur.DueAt = due
-		cur.DueReason = reason
-		if snapshot.MediaType != "series" {
-			cur.Completed = completed
+		cur.DueAt = res.due
+		cur.DueReason = res.reason
+		cur.Failed = res.failed
+		if snapshot.MediaType == "series" {
+			cur.PendingAired = res.pendingAired
+		} else {
+			cur.Completed = res.completed
 		}
 	}
 	if e := m.store.PutMonitored(ctx, *cur); e != nil {
 		m.log.Warn("update monitored", "key", cur.Key, "error", e)
 	}
-	if cur.Completed {
+	if cur.Completed || cur.Failed {
 		return time.Time{}
 	}
 	return cur.DueAt
@@ -270,36 +377,42 @@ func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, d
 // processMovie pins a released+available movie (marking it Completed) or returns
 // when to look again. completed is true once every requested quality is pinned;
 // the item is kept (not deleted) so the monitor list is a request history.
-func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next time.Time, completed bool, reason, errMsg string) {
+func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) passResult {
 	now := m.now()
 	release, err := m.meta.MovieReleaseDate(ctx, it.IMDbID, it.TMDbID, now)
 	switch {
 	case errors.Is(err, metadata.ErrNoHomeRelease):
-		return now.Add(m.interval), false, store.DueReasonRetry, "" // theatrical-only — check again later
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // theatrical-only — check again later
 	case err != nil:
 		m.log.Warn("movie release lookup", "title", it.Title, "error", err)
-		return now.Add(m.interval), false, store.DueReasonRetry, err.Error()
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error()}
 	case release.After(now):
-		return release, false, store.DueReasonRelease, "" // wake at the real release date
+		return passResult{due: release, reason: store.DueReasonRelease} // wake at the real release date
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
 	if m.pinMissing(ctx, targetsForQualities(it, 0, 0), pinned) == 0 {
-		return time.Time{}, true, store.DueReasonRetry, "" // fully pinned — done, kept for history
+		return passResult{completed: true, reason: store.DueReasonRetry} // fully pinned — done, kept for history
 	}
-	return now.Add(m.interval), false, store.DueReasonRetry, "" // released but no stream yet — retry
+	return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // released but no stream yet — retry
 }
 
 // processSeries pins any aired-but-unpinned episodes and schedules the next wake
 // at the next known airstamp. A series is never completed (it may add seasons).
-func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next time.Time, reason, errMsg string) {
+func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passResult {
 	now := m.now()
 	all, err := m.meta.Episodes(ctx, it.IMDbID)
 	if err != nil {
+		if errors.Is(err, metadata.ErrIMDbRequired) {
+			// Permanent identity failure — a series can never be enumerated without
+			// an imdb id, so give up rather than retry forever.
+			m.log.Warn("series enumerate: unresolvable identity", "title", it.Title, "error", err)
+			return passResult{reason: store.DueReasonRetry, errMsg: err.Error(), failed: true}
+		}
 		m.log.Warn("series enumerate", "title", it.Title, "error", err)
-		return now.Add(m.interval), store.DueReasonRetry, err.Error()
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error()}
 	}
 	if len(it.Seasons) > 0 {
 		all = filterSeasons(all, it.Seasons) // honor a per-season Seerr request
@@ -322,14 +435,14 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next t
 	if remaining > 0 {
 		retry := now.Add(m.interval)
 		if hasNext && nextAir.Before(retry) {
-			return nextAir, store.DueReasonAirstamp, ""
+			return passResult{due: nextAir, reason: store.DueReasonAirstamp, pendingAired: remaining}
 		}
-		return retry, store.DueReasonRetry, ""
+		return passResult{due: retry, reason: store.DueReasonRetry, pendingAired: remaining}
 	}
 	if hasNext {
-		return nextAir, store.DueReasonAirstamp, "" // all aired episodes pinned — wake near the next airing
+		return passResult{due: nextAir, reason: store.DueReasonAirstamp} // all aired episodes pinned — wake near the next airing
 	}
-	return now.Add(m.interval), store.DueReasonRetry, "" // no known upcoming episode — check again at the ceiling
+	return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // no known upcoming episode — check again at the ceiling
 }
 
 // pinMissing pins every target not already pinned, returning how many remain
@@ -381,6 +494,7 @@ func targetsForQualities(it store.Monitored, season, episode int) []Target {
 		out = append(out, Target{
 			MediaType: it.MediaType, IMDbID: it.IMDbID, TMDbID: it.TMDbID, TVDbID: it.TVDbID,
 			Title: it.Title, Year: it.Year, Season: season, Episode: episode, Quality: q,
+			Category: it.Category,
 		})
 	}
 	return out
