@@ -54,6 +54,10 @@ wisp embeds rclone and mounts the library itself — no separate rclone
 container or process. Point your media server's library at `/mnt/wisp`. Leave
 `WISP_MOUNT_PATH` unset to serve HTTP only and mount it however you like.
 
+The self-mounted library supports deletion: `rm` on a mounted media file unpins
+it from Wisp. Creating, editing, and renaming mounted files remain intentionally
+unsupported.
+
 ## Instant Silo Autoscan
 
 Create one ARR-compatible webhook source in **Silo → Autoscan → Sources**, copy
@@ -71,7 +75,8 @@ for:
 - **Import** — immediately scans a newly pinned movie or episode.
 - **Rename** — removes the previous path and scans the replacement when a
   re-resolve changes the virtual filename.
-- **File Delete** — removes a deleted pin from Silo's library.
+- **File Delete** — removes a deleted pin from Silo's library (via the API or a
+  mounted `rm`).
 
 Webhook failures never prevent a pin or delete. Keep the AIOStreams plugin's
 Wisp Pins polling source enabled as a recovery path. Treat the webhook URL as a

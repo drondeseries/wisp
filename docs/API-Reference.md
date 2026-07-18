@@ -74,6 +74,10 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 
 Response: `{"deleted": ["<virtual_path>", ...]}`.
 
+With Wisp's self-mount enabled, deleting a media file directly from the mount
+performs the same unpin operation as `DELETE /api/pins`.
+The mount does not permit creating, modifying, or renaming media files.
+
 ---
 
 ## `GET /api/status`

@@ -23,6 +23,7 @@ import (
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/silowebhook"
 	"github.com/dreulavelle/wisp/internal/store"
+	"github.com/rclone/rclone/fs"
 )
 
 func main() {
@@ -78,6 +79,7 @@ func main() {
 			AllowOther:         cfg.MountAllowOther,
 			ReadChunkSize:      cfg.ReadChunkSize,
 			ReadChunkSizeLimit: cfg.ReadChunkSizeLimit,
+			Delete:             app.deleteMountedPin,
 		}, log)
 		if err != nil {
 			log.Error("self-mount failed", "error", err)
@@ -249,7 +251,7 @@ func (a *app) handleListPins(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 	if path := strings.TrimSpace(r.URL.Query().Get("path")); path != "" {
-		existed, err := a.store.Delete(r.Context(), path)
+		existed, err := a.deletePin(r.Context(), path)
 		if err != nil {
 			http.Error(w, "delete failed", http.StatusInternalServerError)
 			return
@@ -258,9 +260,7 @@ func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		a.log.Info("deleted", "path", path)
 		writeJSON(w, map[string]any{"deleted": []string{path}})
-		a.webhook.Delete(r.Context(), mediaTypeForPath(path), path)
 		return
 	}
 	var req struct {
@@ -289,6 +289,31 @@ func mediaTypeForPath(virtualPath string) string {
 		return "series"
 	}
 	return "movie"
+}
+
+func (a *app) deletePin(ctx context.Context, path string) (bool, error) {
+	path = strings.TrimLeft(strings.TrimSpace(path), "/")
+	existed, err := a.store.Delete(ctx, path)
+	if err != nil || !existed {
+		return existed, err
+	}
+	a.log.Info("deleted", "path", path)
+	// Fire from the shared helper so both the API and a mounted `rm` notify Silo.
+	// The bulk (imdb_id) delete path uses DeleteByMedia directly and emits its own
+	// events, so this does not double-fire.
+	a.webhook.Delete(ctx, mediaTypeForPath(path), path)
+	return true, nil
+}
+
+func (a *app) deleteMountedPin(ctx context.Context, path string) error {
+	existed, err := a.deletePin(ctx, path)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		return fs.ErrorObjectNotFound
+	}
+	return nil
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
