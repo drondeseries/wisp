@@ -40,13 +40,21 @@ type Service struct {
 	tvmazeBase   string
 }
 
+// Option configures a Service.
+type Option func(*Service)
+
+// WithBaseURLs overrides the provider base URLs (used by tests).
+func WithBaseURLs(cinemeta, tmdb, tvmaze string) Option {
+	return func(s *Service) { s.cinemetaBase, s.tmdbBase, s.tvmazeBase = cinemeta, tmdb, tvmaze }
+}
+
 // New builds a metadata service. tmdbKey may be empty (movie gating then falls
 // back to Cinemeta); markets defaults to US when empty.
-func New(tmdbKey string, markets []string) *Service {
+func New(tmdbKey string, markets []string, opts ...Option) *Service {
 	if len(markets) == 0 {
 		markets = []string{"US"}
 	}
-	return &Service{
+	s := &Service{
 		http:         &http.Client{Timeout: 25 * time.Second},
 		tmdbKey:      strings.TrimSpace(tmdbKey),
 		tmdbMarkets:  markets,
@@ -54,6 +62,10 @@ func New(tmdbKey string, markets []string) *Service {
 		tmdbBase:     "https://api.themoviedb.org/3",
 		tvmazeBase:   "https://api.tvmaze.com",
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // getJSON performs a GET and decodes a JSON body into out. auth, when set,

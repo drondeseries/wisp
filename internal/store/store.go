@@ -46,7 +46,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(pinsBucket)
+		if _, err := tx.CreateBucketIfNotExists(pinsBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(monitorsBucket)
 		return err
 	}); err != nil {
 		db.Close()
@@ -200,6 +203,25 @@ func (s *Store) DeleteByMedia(_ context.Context, imdbID string, season, episode 
 		return nil
 	})
 	return deleted, err
+}
+
+// PinsByMedia returns every pin for an IMDb id (all seasons/episodes/qualities),
+// so the monitor can dedupe without re-pinning what already exists.
+func (s *Store) PinsByMedia(_ context.Context, imdbID string) ([]Pin, error) {
+	var pins []Pin
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(pinsBucket).ForEach(func(_, v []byte) error {
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if p.IMDbID == imdbID {
+				pins = append(pins, p)
+			}
+			return nil
+		})
+	})
+	return pins, err
 }
 
 // Children returns the immediate directory and file names under a virtual
