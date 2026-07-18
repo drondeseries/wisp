@@ -9,6 +9,16 @@ never downloads anything — each virtual file's bytes are range-proxied from th
 resolved stream on demand. Point any media server (Silo, Plex, Jellyfin, Emby)
 at the mount and it scans, probes, and plays them like local files.
 
+> **Designed for AIOStreams.** wisp is built to run alongside
+> [AIOStreams](https://github.com/Viren070/AIOStreams) and the
+> [AIOStreams Silo plugin](https://github.com/drondeseries/silo-plugin-aiostreams),
+> and it talks to AIOStreams' Search API directly (not the generic Stremio addon
+> protocol) — so AIOStreams is required. That's not really a limit, though:
+> AIOStreams is the aggregator, so whatever Stremio scrapers, debrid services, or
+> usenet sources you configure *there* (Torrentio, Comet, MediaFusion, Easynews,
+> …) all flow through to wisp. Any feeder that can POST to wisp's tiny
+> [API](#api) works; the bundled Silo plugin is just the first one.
+
 ## How it works
 
 - **Add** a movie or episode via the API. wisp asks AIOStreams for the best
