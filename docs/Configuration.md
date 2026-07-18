@@ -9,6 +9,7 @@ All configuration is via environment variables.
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address. |
 | `WISP_DB_PATH` | `/data/wisp.db` | bbolt pin database. Persist this (a volume) to keep your library across restarts. |
 | `WISP_MOUNT_PATH` | — | If set, wisp self-mounts the library here (needs `/dev/fuse` + `SYS_ADMIN`). Unset = serve HTTP only and mount it yourself. |
+| `WISP_SILO_WEBHOOK_URL` | — | Optional ARR-compatible Silo Autoscan webhook. Sends import, rename, and file-delete events immediately. Keep this URL secret. |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Expose the mount to other UIDs — needed when a media-server container reads the mount as a different user. |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. `debug` narrates every serve + the full self-heal path. |
 
@@ -31,6 +32,18 @@ debrid vs usenet, filtering. wisp adds no ranking or filtering of its own.
 Mount a volume at `WISP_DB_PATH`'s directory (default `/data`). The pin database
 is the whole library — lose it and you'd re-add everything (pins re-resolve
 fine, but the list is gone).
+
+## Silo webhook
+
+Add an ARR-compatible webhook source in Silo Autoscan and set its generated URL
+as `WISP_SILO_WEBHOOK_URL`. No event checkboxes or additional path settings are
+required. wisp sends Import, Rename, and File Delete events and derives the
+reported path from `WISP_MOUNT_PATH`, falling back to `/mnt/wisp`.
+
+Delivery is best-effort: Silo or network failures are logged but do not fail the
+Wisp operation. Leave the AIOStreams plugin's Wisp Pins polling source enabled
+to recover any missed webhook. The generated URL contains a secret and should be
+rotated if it is exposed.
 
 ## Mount tuning (self-mount mode)
 

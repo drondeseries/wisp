@@ -21,6 +21,9 @@ type Config struct {
 	ListenAddr string
 	// DBPath is where the pin database lives.
 	DBPath string
+	// SiloWebhookURL is the optional Silo Autoscan webhook notified after
+	// imports, renames, and file deletions.
+	SiloWebhookURL string
 	// MountPath, when set, makes wisp self-mount the library there via the
 	// embedded rclone VFS. Empty = serve HTTP only (mount it yourself).
 	MountPath string
@@ -47,6 +50,7 @@ func Load() (*Config, error) {
 		AIOStreamsPassword: os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
 		ListenAddr:         envOr("WISP_LISTEN_ADDR", ":8080"),
 		DBPath:             envOr("WISP_DB_PATH", "/data/wisp.db"),
+		SiloWebhookURL:     strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
 		MountPath:          strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
 		MountAllowOther:    boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
 		LogLevel:           strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),

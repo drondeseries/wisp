@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/mount"
 	"github.com/dreulavelle/wisp/internal/server"
+	"github.com/dreulavelle/wisp/internal/silowebhook"
 	"github.com/dreulavelle/wisp/internal/store"
 )
 
@@ -38,7 +40,11 @@ func main() {
 	defer st.Close()
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
-	app := &app{store: st, aio: aio, log: log, mountPath: cfg.MountPath, startedAt: time.Now()}
+	app := &app{
+		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
+		webhook:   silowebhook.New(cfg.SiloWebhookURL, cfg.MountPath, log),
+		startedAt: time.Now(),
+	}
 
 	srv := server.New(st, app.reResolve, log)
 	app.srv = srv
@@ -128,6 +134,7 @@ type app struct {
 	log       *slog.Logger
 	srv       *server.Server
 	mnt       *mount.Mount
+	webhook   *silowebhook.Client
 	mountPath string
 	startedAt time.Time
 }
@@ -192,6 +199,13 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 	} else {
 		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, ids, quality, ext)
 	}
+	existing, _ := a.store.List(r.Context())
+	var renamed []store.Pin
+	for _, old := range existing {
+		if old.IMDbID == req.IMDbID && old.Season == req.Season && old.Episode == req.Episode && old.VirtualPath != vpath {
+			renamed = append(renamed, old)
+		}
+	}
 	pin := store.Pin{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, Season: req.Season, Episode: req.Episode,
 		Title: req.Title, Year: req.Year, Quality: quality, VirtualPath: vpath,
@@ -202,6 +216,16 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log.Info("pinned", "path", vpath, "size", size)
+	for _, old := range renamed {
+		if deleted, err := a.store.Delete(r.Context(), old.VirtualPath); err != nil {
+			a.log.Warn("remove renamed pin", "path", old.VirtualPath, "error", err)
+		} else if deleted {
+			a.webhook.Rename(r.Context(), req.MediaType, old.VirtualPath, vpath)
+		}
+	}
+	if len(renamed) == 0 {
+		a.webhook.Import(r.Context(), req.MediaType, vpath)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"virtual_path": vpath, "size": size})
 }
@@ -236,6 +260,7 @@ func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 		}
 		a.log.Info("deleted", "path", path)
 		writeJSON(w, map[string]any{"deleted": []string{path}})
+		a.webhook.Delete(r.Context(), mediaTypeForPath(path), path)
 		return
 	}
 	var req struct {
@@ -254,6 +279,16 @@ func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 	}
 	a.log.Info("deleted", "imdb", req.IMDbID, "count", len(deleted))
 	writeJSON(w, map[string]any{"deleted": deleted})
+	for _, path := range deleted {
+		a.webhook.Delete(r.Context(), mediaTypeForPath(path), path)
+	}
+}
+
+func mediaTypeForPath(virtualPath string) string {
+	if strings.HasPrefix(strings.TrimLeft(virtualPath, "/"), "shows/") {
+		return "series"
+	}
+	return "movie"
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +338,8 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 	return a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size)
 }
 
-// resolve picks the top-ranked playable stream and measures its size.
+// resolve picks the highest-ranked stream whose resolver can serve media and
+// report the complete file size. A bad resolver must not hide later results.
 func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int) (sourceURL string, size int64, filename, resolution string, err error) {
 	streams, err := a.aio.Search(ctx, mediaType, imdbID, season, episode)
 	if err != nil {
@@ -312,30 +348,71 @@ func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, epi
 	if len(streams) == 0 {
 		return "", 0, "", "", fmt.Errorf("no results")
 	}
-	top := streams[0]
-	size, err = headSize(ctx, top.URL)
+	stream, size, err := selectPlayableStream(ctx, streams)
 	if err != nil {
-		return "", 0, "", "", fmt.Errorf("size probe: %w", err)
+		return "", 0, "", "", err
 	}
-	return top.URL, size, top.Filename, top.Resolution, nil
+	return stream.URL, size, stream.Filename, stream.Resolution, nil
 }
 
-// headSize follows redirects to the CDN and returns the reported size.
-func headSize(ctx context.Context, rawURL string) (int64, error) {
+func selectPlayableStream(ctx context.Context, streams []aiostreams.Stream) (aiostreams.Stream, int64, error) {
+	var lastErr error
+	for _, stream := range streams {
+		size, err := probeSize(ctx, stream.URL)
+		if err == nil {
+			return stream, size, nil
+		}
+		lastErr = err
+	}
+	return aiostreams.Stream{}, 0, fmt.Errorf("all %d results failed probing: %w", len(streams), lastErr)
+}
+
+// probeSize uses a one-byte ranged GET because AIOStreams resolver permalinks
+// do not support HEAD. For a partial response, Content-Range carries the full
+// media size; servers that ignore Range may instead return 200 + Content-Length.
+func probeSize(ctx context.Context, rawURL string) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("User-Agent", "wisp")
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return 0, fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "json") {
+		return 0, fmt.Errorf("upstream returned non-media content type %q", contentType)
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		size, err := contentRangeSize(resp.Header.Get("Content-Range"))
+		if err != nil {
+			return 0, err
+		}
+		return size, nil
+	}
 	if resp.ContentLength <= 0 {
 		return 0, fmt.Errorf("upstream did not report a size (HTTP %d)", resp.StatusCode)
 	}
 	return resp.ContentLength, nil
+}
+
+func contentRangeSize(value string) (int64, error) {
+	_, total, ok := strings.Cut(strings.TrimSpace(value), "/")
+	if !ok || total == "" || total == "*" {
+		return 0, fmt.Errorf("upstream returned invalid Content-Range %q", value)
+	}
+	size, err := strconv.ParseInt(total, 10, 64)
+	if err != nil || size <= 0 {
+		return 0, fmt.Errorf("upstream returned invalid Content-Range %q", value)
+	}
+	return size, nil
 }
