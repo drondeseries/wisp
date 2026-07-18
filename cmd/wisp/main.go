@@ -70,8 +70,8 @@ func main() {
 			ServerURL:          "http://127.0.0.1" + portOf(cfg.ListenAddr),
 			Mountpoint:         cfg.MountPath,
 			AllowOther:         cfg.MountAllowOther,
-			ReadChunkSize:      32 << 20,  // 32M first read: snappy seeks
-			ReadChunkSizeLimit: 512 << 20, // ramp for sequential playback
+			ReadChunkSize:      cfg.ReadChunkSize,
+			ReadChunkSizeLimit: cfg.ReadChunkSizeLimit,
 		}, log)
 		if err != nil {
 			log.Error("self-mount failed", "error", err)

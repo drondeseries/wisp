@@ -96,6 +96,8 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks) |
+| `WISP_READ_CHUNK_SIZE_LIMIT` | `512M` | Cap for the chunk ramp |
 
 ## Documentation
 
