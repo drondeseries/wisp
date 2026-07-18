@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,5 +350,51 @@ func TestCDNLinkCacheSkipsRedirect(t *testing.T) {
 	}
 	if cdnHits != 4 {
 		t.Fatalf("cdn hit %d times, want 4", cdnHits)
+	}
+}
+
+// TestStaleCDNRefreshesViaPermalink proves the cache never gets stuck on an
+// expired CDN URL: when the cached CDN link dies, the next read falls back to
+// the permalink, which resolves a fresh CDN URL, and playback continues.
+func TestStaleCDNRefreshesViaPermalink(t *testing.T) {
+	var gen atomic.Int64
+	gen.Store(1)
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the current generation's path is live; older ones 404 (expired).
+		if r.URL.Path != fmt.Sprintf("/gen%d.mkv", gen.Load()) {
+			http.Error(w, "expired", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 0-3/16")
+		w.WriteHeader(http.StatusPartialContent)
+		io.WriteString(w, "data")
+	}))
+	defer cdn.Close()
+	permalink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, fmt.Sprintf("%s/gen%d.mkv", cdn.URL, gen.Load()), http.StatusFound)
+	}))
+	defer permalink.Close()
+
+	st := newTestStore(t)
+	pin := pinEpisode(t, st, permalink.URL, 16)
+	srv := New(st, nil, discard())
+
+	read := func() int {
+		req := getReq(pin.VirtualPath)
+		req.Header.Set("Range", "bytes=0-3")
+		rec := httptest.NewRecorder()
+		srv.FileHandler(rec, req)
+		return rec.Code
+	}
+
+	if read() != http.StatusPartialContent { // caches /gen1
+		t.Fatal("first read failed")
+	}
+	gen.Store(2) // the cached /gen1 URL is now expired
+	if code := read(); code != http.StatusPartialContent {
+		t.Fatalf("stale-CDN read = %d, want 206 (should refresh via permalink)", code)
+	}
+	if got := srv.Metrics().CacheHits; got < 1 {
+		t.Fatalf("cache hits = %d", got)
 	}
 }
