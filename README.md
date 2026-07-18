@@ -54,6 +54,10 @@ wisp embeds rclone and mounts the library itself — no separate rclone
 container or process. Point your media server's library at `/mnt/wisp`. Leave
 `WISP_MOUNT_PATH` unset to serve HTTP only and mount it however you like.
 
+The self-mounted library supports deletion: `rm` on a mounted media file unpins
+it from Wisp. Creating, editing, and renaming mounted files remain intentionally
+unsupported.
+
 ## API
 
 Add an episode:

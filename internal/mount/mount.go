@@ -36,6 +36,7 @@ type Options struct {
 	// sequential playback efficient.
 	ReadChunkSize      int64
 	ReadChunkSizeLimit int64
+	Delete             func(context.Context, string) error
 }
 
 const (
@@ -77,6 +78,9 @@ func Start(ctx context.Context, opt Options, log *slog.Logger) (*Mount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create http backend: %w", err)
 	}
+	if opt.Delete != nil {
+		f = &deleteFS{Fs: f, delete: opt.Delete}
+	}
 
 	mountOpt := mountlib.Opt // copy defaults
 	mountOpt.AllowOther = opt.AllowOther
@@ -103,6 +107,46 @@ func Start(ctx context.Context, opt Options, log *slog.Logger) (*Mount, error) {
 	log.Info("mounted", "mountpoint", opt.Mountpoint, "backend", "http+go-fuse")
 	go m.supervise()
 	return m, nil
+}
+
+// deleteFS adds unlink support to rclone's otherwise read-only HTTP backend.
+type deleteFS struct {
+	fs.Fs
+	delete func(context.Context, string) error
+}
+
+func (f *deleteFS) List(ctx context.Context, dir string) (fs.DirEntries, error) {
+	entries, err := f.Fs.List(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	for i, entry := range entries {
+		if obj, ok := entry.(fs.Object); ok {
+			entries[i] = &deleteObject{Object: obj, fs: f}
+		}
+	}
+	return entries, nil
+}
+
+func (f *deleteFS) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	obj, err := f.Fs.NewObject(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+	return &deleteObject{Object: obj, fs: f}, nil
+}
+
+// Directories are synthesized from pin paths and vanish with their final pin.
+func (f *deleteFS) Rmdir(context.Context, string) error { return nil }
+
+type deleteObject struct {
+	fs.Object
+	fs *deleteFS
+}
+
+func (o *deleteObject) Fs() fs.Info { return o.fs }
+func (o *deleteObject) Remove(ctx context.Context) error {
+	return o.fs.delete(ctx, strings.TrimLeft(o.Remote(), "/"))
 }
 
 // mountOnce performs a single mount and records it as the current mount point.
