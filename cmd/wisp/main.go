@@ -17,6 +17,7 @@ import (
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 	"github.com/dreulavelle/wisp/internal/config"
 	"github.com/dreulavelle/wisp/internal/library"
+	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/mount"
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
@@ -136,6 +137,8 @@ type addRequest struct {
 	Season    int    `json:"season"`
 	Episode   int    `json:"episode"`
 	Quality   string `json:"quality"`
+	TMDbID    string `json:"tmdb_id"`
+	TVDbID    string `json:"tvdb_id"`
 }
 
 func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
@@ -171,12 +174,20 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 	if quality == "" {
 		quality = "1080p"
 	}
+	ids := library.IDs{IMDb: req.IMDbID, TMDb: req.TMDbID, TVDb: req.TVDbID}
+	// If a feeder gave only an IMDb id, enrich TVDB/TMDB ids from Cinemeta so the
+	// folder tag lets the media server match deterministically (Silo/Plex/
+	// Jellyfin resolve by tvdb/tmdb, not imdb).
+	if ids.TVDb == "" && ids.TMDb == "" && strings.HasPrefix(req.IMDbID, "tt") {
+		tvdb, tmdb := metadata.ProviderIDs(r.Context(), req.MediaType, req.IMDbID)
+		ids.TVDb, ids.TMDb = tvdb, tmdb
+	}
 	ext := library.Ext(filename)
 	var vpath string
 	if req.MediaType == "movie" {
-		vpath = library.MoviePath(req.Title, req.Year, quality, ext)
+		vpath = library.MoviePath(req.Title, req.Year, ids, quality, ext)
 	} else {
-		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, quality, ext)
+		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, ids, quality, ext)
 	}
 	pin := store.Pin{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, Season: req.Season, Episode: req.Episode,
