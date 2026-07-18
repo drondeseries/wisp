@@ -23,7 +23,16 @@ type Monitored struct {
 	Title     string    // for folder/file naming
 	Year      int       // for folder/file naming
 	Qualities []string  // requested tiers; empty = default (best stream)
+	Seasons   []int     // series: requested seasons; empty = all
 	DueAt     time.Time // earliest time worth re-checking (release or next air)
+
+	// Observability / control (kept-and-marked so the monitor list doubles as a
+	// request history — idea from drondeseries's PR #5).
+	Enabled     bool      // false = paused; kept but not refreshed
+	Completed   bool      // movie: every requested quality is pinned
+	LastChecked time.Time // when the scheduler last processed it
+	LastError   string    // last non-fatal error, for surfacing in the CRUD API
+
 	AddedAt   time.Time
 	UpdatedAt time.Time
 }
@@ -41,6 +50,24 @@ func (s *Store) PutMonitored(_ context.Context, m Monitored) error {
 		}
 		return tx.Bucket(monitorsBucket).Put([]byte(m.Key), val)
 	})
+}
+
+// GetMonitored returns the monitored item for a key, or (nil, nil) if absent.
+func (s *Store) GetMonitored(_ context.Context, key string) (*Monitored, error) {
+	var item *Monitored
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket(monitorsBucket).Get([]byte(key))
+		if v == nil {
+			return nil
+		}
+		var m Monitored
+		if err := json.Unmarshal(v, &m); err != nil {
+			return err
+		}
+		item = &m
+		return nil
+	})
+	return item, err
 }
 
 // ListMonitored returns every monitored item.

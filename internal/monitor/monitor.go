@@ -52,6 +52,7 @@ type Request struct {
 	Title     string
 	Year      int
 	Qualities []string
+	Seasons   []int // series: requested seasons; empty = all
 }
 
 // Fulfiller resolves+pins targets and reports what is already pinned. The app
@@ -103,7 +104,21 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 	item := store.Monitored{
 		Key: monitorKey(r.MediaType, r.IMDbID, r.TMDbID), MediaType: r.MediaType,
 		IMDbID: r.IMDbID, TMDbID: r.TMDbID, TVDbID: r.TVDbID, Title: r.Title,
-		Year: r.Year, Qualities: r.Qualities, DueAt: m.now(),
+		Year: r.Year, Qualities: r.Qualities, Seasons: r.Seasons, DueAt: m.now(),
+		Enabled: true,
+	}
+	// A later request for the same title extends the existing monitor (e.g. a new
+	// season, or a 4K request on top of HD) rather than replacing it. A request
+	// that scopes no seasons widens coverage to all seasons. Re-requesting clears
+	// Completed so the new work is picked up.
+	if existing, _ := m.store.GetMonitored(ctx, item.Key); existing != nil {
+		item.AddedAt = existing.AddedAt
+		item.Qualities = unionStrings(existing.Qualities, r.Qualities)
+		if len(existing.Seasons) == 0 || len(r.Seasons) == 0 {
+			item.Seasons = nil // one unscoped request means "all seasons"
+		} else {
+			item.Seasons = unionInts(existing.Seasons, r.Seasons)
+		}
 	}
 	if err := m.store.PutMonitored(ctx, item); err != nil {
 		return err
@@ -157,23 +172,25 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 	now := m.now()
 	var earliest time.Time
 	for _, it := range items {
+		if !it.Enabled || it.Completed {
+			continue // paused, or a fully-pinned movie kept for history
+		}
 		due := it.DueAt
 		if !due.After(now) {
-			var retire bool
+			var errMsg string
 			if it.MediaType == "series" {
-				due = m.processSeries(ctx, it)
+				due, errMsg = m.processSeries(ctx, it)
 			} else {
-				due, retire = m.processMovie(ctx, it)
-			}
-			if retire {
-				if err := m.store.DeleteMonitored(ctx, it.Key); err != nil {
-					m.log.Warn("retire monitored", "key", it.Key, "error", err)
-				}
-				continue
+				due, it.Completed, errMsg = m.processMovie(ctx, it)
 			}
 			it.DueAt = due
+			it.LastChecked = now
+			it.LastError = errMsg
 			if err := m.store.PutMonitored(ctx, it); err != nil {
 				m.log.Warn("update monitored", "key", it.Key, "error", err)
+			}
+			if it.Completed {
+				continue // no future wake needed for a finished movie
 			}
 		}
 		if earliest.IsZero() || due.Before(earliest) {
@@ -183,38 +200,42 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 	return earliest
 }
 
-// processMovie pins a released+available movie (retiring it) or returns when to
-// look again.
-func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next time.Time, retire bool) {
+// processMovie pins a released+available movie (marking it Completed) or returns
+// when to look again. completed is true once every requested quality is pinned;
+// the item is kept (not deleted) so the monitor list is a request history.
+func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next time.Time, completed bool, errMsg string) {
 	now := m.now()
 	release, err := m.meta.MovieReleaseDate(ctx, it.IMDbID, it.TMDbID, now)
 	switch {
 	case errors.Is(err, metadata.ErrNoHomeRelease):
-		return now.Add(m.interval), false // theatrical-only — check again later
+		return now.Add(m.interval), false, "" // theatrical-only — check again later
 	case err != nil:
 		m.log.Warn("movie release lookup", "title", it.Title, "error", err)
-		return now.Add(m.interval), false
+		return now.Add(m.interval), false, err.Error()
 	case release.After(now):
-		return release, false // wake at release
+		return release, false, "" // wake at release
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, it.IMDbID)
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
 	if m.pinMissing(ctx, targetsForQualities(it, 0, 0), pinned) == 0 {
-		return time.Time{}, true // fully pinned — done
+		return time.Time{}, true, "" // fully pinned — done, kept for history
 	}
-	return now.Add(m.interval), false // released but no stream yet — retry
+	return now.Add(m.interval), false, "" // released but no stream yet — retry
 }
 
 // processSeries pins any aired-but-unpinned episodes and schedules the next wake
-// at the next known airstamp. A series is never retired (it may add seasons).
-func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) time.Time {
+// at the next known airstamp. A series is never completed (it may add seasons).
+func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next time.Time, errMsg string) {
 	now := m.now()
 	all, err := m.meta.Episodes(ctx, it.IMDbID)
 	if err != nil {
 		m.log.Warn("series enumerate", "title", it.Title, "error", err)
-		return now.Add(m.interval)
+		return now.Add(m.interval), err.Error()
+	}
+	if len(it.Seasons) > 0 {
+		all = filterSeasons(all, it.Seasons) // honor a per-season Seerr request
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, it.IMDbID)
 	if err != nil {
@@ -227,9 +248,9 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) time.Ti
 		m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)
 	}
 	if next, ok := metadata.NextAir(all, now); ok {
-		return next // wake right around the next airing
+		return next, "" // wake right around the next airing
 	}
-	return now.Add(m.interval) // no known upcoming episode — check again at the ceiling
+	return now.Add(m.interval), "" // no known upcoming episode — check again at the ceiling
 }
 
 // pinMissing pins every target not already pinned, returning how many remain
@@ -282,6 +303,44 @@ func targetsForQualities(it store.Monitored, season, episode int) []Target {
 			MediaType: it.MediaType, IMDbID: it.IMDbID, TMDbID: it.TMDbID, TVDbID: it.TVDbID,
 			Title: it.Title, Year: it.Year, Season: season, Episode: episode, Quality: q,
 		})
+	}
+	return out
+}
+
+func filterSeasons(eps []metadata.Episode, seasons []int) []metadata.Episode {
+	want := make(map[int]bool, len(seasons))
+	for _, s := range seasons {
+		want[s] = true
+	}
+	out := eps[:0:0]
+	for _, e := range eps {
+		if want[e.Season] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func unionStrings(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range append(append([]string{}, a...), b...) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func unionInts(a, b []int) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, n := range append(append([]int{}, a...), b...) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
 	}
 	return out
 }

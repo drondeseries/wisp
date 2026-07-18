@@ -68,7 +68,7 @@ func testMonitor(t *testing.T, mux *http.ServeMux, ful Fulfiller, now time.Time)
 	return m, st
 }
 
-func TestMonitorPinsReleasedMovieAndRetires(t *testing.T) {
+func TestMonitorPinsReleasedMovieAndMarksComplete(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/movie/500/release_dates", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"results":[{"iso_3166_1":"US","release_dates":[{"type":4,"release_date":"2026-01-01T00:00:00Z"}]}]}`))
@@ -80,13 +80,20 @@ func TestMonitorPinsReleasedMovieAndRetires(t *testing.T) {
 	if err := m.Intake(context.Background(), Request{MediaType: "movie", IMDbID: "tt5", TMDbID: "500", Title: "Film", Year: 2026}); err != nil {
 		t.Fatal(err)
 	}
-	m.checkDue(context.Background()) // released → pin + retire
+	m.checkDue(context.Background()) // released → pin + mark complete (kept for history)
 
 	if ful.calls != 1 || len(ful.pinned) != 1 {
 		t.Fatalf("expected 1 pin, got calls=%d pinned=%d", ful.calls, len(ful.pinned))
 	}
-	if n, _ := st.CountMonitored(context.Background()); n != 0 {
-		t.Fatalf("released+pinned movie should retire; monitored=%d", n)
+	got, _ := st.GetMonitored(context.Background(), "movie:tt5")
+	if got == nil || !got.Completed {
+		t.Fatalf("movie should be kept and marked completed; got %#v", got)
+	}
+	// A completed movie is not reprocessed.
+	before := ful.calls
+	m.checkDue(context.Background())
+	if ful.calls != before {
+		t.Fatalf("completed movie reprocessed: calls %d → %d", before, ful.calls)
 	}
 }
 
@@ -157,7 +164,7 @@ func TestMonitorRecoversFromStore(t *testing.T) {
 	now := date("2026-06-01T00:00:00Z")
 	m, st := testMonitor(t, mux, ful, now)
 	st.PutMonitored(context.Background(), store.Monitored{
-		Key: "movie:tt5", MediaType: "movie", IMDbID: "tt5", TMDbID: "500", Title: "Film", DueAt: now,
+		Key: "movie:tt5", MediaType: "movie", IMDbID: "tt5", TMDbID: "500", Title: "Film", DueAt: now, Enabled: true,
 	})
 
 	m.checkDue(context.Background()) // fresh monitor, item loaded from store
