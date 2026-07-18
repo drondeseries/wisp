@@ -41,19 +41,20 @@ transcode, and seeking all work.
 ## Quick start
 
 wisp embeds rclone and self-mounts the library — one container, no separate
-rclone process:
+rclone process. Copy the env template and fill in your AIOStreams URL + password:
+
+```sh
+cp .env.example .env      # then edit .env
+```
 
 ```yaml
 services:
   wisp:
     image: ghcr.io/dreulavelle/wisp:latest
     container_name: wisp
-    environment:
-      WISP_AIOSTREAMS_URL: https://your-aiostreams/stremio/<uuid>/<config>/manifest.json
-      WISP_AIOSTREAMS_PASSWORD: your-addon-password
-      WISP_MOUNT_PATH: /mnt/wisp            # wisp mounts the library here
+    env_file: .env                          # all WISP_* settings (see .env.example)
     volumes:
-      - ./data:/data                        # persist the pin database
+      - ./data:/data                        # persist the pin + monitor database
       - /mnt/wisp:/mnt/wisp:rshared         # share the mount out to the host
     devices:
       - /dev/fuse

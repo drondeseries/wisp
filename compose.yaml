@@ -1,0 +1,36 @@
+# wisp — a standalone request-to-playback engine (Seerr + wisp + AIOStreams).
+#
+#   1. cp .env.example .env    # then edit .env (AIOStreams URL + password required)
+#   2. share the host mountpoint once so wisp's FUSE mount reaches the host:
+#        mkdir -p /mnt/wisp && mount --bind /mnt/wisp /mnt/wisp && mount --make-rshared /mnt/wisp
+#   3. docker compose up -d
+#
+# Point your media server at /mnt/wisp. If it runs in its own container, bind the
+# mount `:ro,rslave` so it sees wisp's FUSE mount (and re-sees it after a restart).
+
+services:
+  wisp:
+    image: ghcr.io/dreulavelle/wisp:latest
+    container_name: wisp
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data                    # pin + monitor database (persist this)
+      - /mnt/wisp:/mnt/wisp:rshared     # share the FUSE mount out to the host
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    ports:
+      - "8080:8080"
+
+  # Your media server — Silo, Plex, Jellyfin, Emby. Usually already running
+  # elsewhere; if you run it here, give it the mount read-only + rslave:
+  #
+  # media-server:
+  #   image: your/media-server
+  #   depends_on: [wisp]
+  #   volumes:
+  #     - /mnt/wisp:/mnt/wisp:ro,rslave
