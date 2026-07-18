@@ -167,7 +167,7 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 		return err
 	}
 	p.SourceURL, p.Size = sourceURL, size
-	return a.store.UpdateResolution(ctx, p.ID, sourceURL, size)
+	return a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size)
 }
 
 // resolve picks the top-ranked playable stream and measures its size.

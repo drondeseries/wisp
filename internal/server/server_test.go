@@ -103,7 +103,7 @@ func TestServeFileReResolvesOnDeadLink(t *testing.T) {
 	reresolve := func(ctx context.Context, p *store.Pin) error {
 		reresolveCalls++
 		p.SourceURL = live.URL
-		return st.UpdateResolution(ctx, p.ID, live.URL, 6)
+		return st.UpdateResolution(ctx, p.VirtualPath, live.URL, 6)
 	}
 	srv := New(st, reresolve, discard())
 

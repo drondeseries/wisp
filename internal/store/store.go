@@ -1,15 +1,21 @@
 // Package store persists pinned stream selections that back virtual files.
+//
+// Pins are held in a single bbolt bucket keyed by virtual path. bbolt is a
+// B+tree, so keys iterate in sorted order — directory listings are a cursor
+// seek to the path prefix, which is exactly the access pattern wisp needs.
 package store
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"go.etcd.io/bbolt"
 )
+
+var pinsBucket = []byte("pins")
 
 // Pin is a virtual file backed by an AIOStreams-resolved stream.
 type Pin struct {
@@ -21,26 +27,29 @@ type Pin struct {
 	Title       string
 	Year        int
 	Quality     string
-	VirtualPath string // library-relative, forward-slash separated
+	VirtualPath string // library-relative, forward-slash separated (the key)
 	SourceURL   string // AIOStreams resolver permalink (re-unlocks debrid on each open)
 	Size        int64
 	ResolvedAt  time.Time
 }
 
-// Store is a SQLite-backed pin repository.
+// Store is a bbolt-backed pin repository.
 type Store struct {
-	db *sql.DB
+	db *bbolt.DB
 }
 
-// Open opens (and migrates) the pin database at path.
+// Open opens (and initializes) the pin database at path.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(pinsBucket)
+		return err
+	}); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+		return nil, fmt.Errorf("init bucket: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -48,112 +57,115 @@ func Open(path string) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS pins (
-	id           INTEGER PRIMARY KEY AUTOINCREMENT,
-	media_type   TEXT    NOT NULL,
-	imdb_id      TEXT    NOT NULL,
-	season       INTEGER NOT NULL DEFAULT 0,
-	episode      INTEGER NOT NULL DEFAULT 0,
-	title        TEXT    NOT NULL,
-	year         INTEGER NOT NULL DEFAULT 0,
-	quality      TEXT    NOT NULL DEFAULT '1080p',
-	virtual_path TEXT    NOT NULL UNIQUE,
-	source_url   TEXT    NOT NULL,
-	size         INTEGER NOT NULL DEFAULT 0,
-	resolved_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pins_lookup ON pins(imdb_id, season, episode);
-`
-
-// Upsert inserts or replaces a pin by its virtual path.
-func (s *Store) Upsert(ctx context.Context, p Pin) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO pins(media_type, imdb_id, season, episode, title, year, quality, virtual_path, source_url, size, resolved_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(virtual_path) DO UPDATE SET
-			source_url=excluded.source_url, size=excluded.size, resolved_at=excluded.resolved_at`,
-		p.MediaType, p.IMDbID, p.Season, p.Episode, p.Title, p.Year, p.Quality,
-		p.VirtualPath, p.SourceURL, p.Size, p.ResolvedAt.Unix())
-	return err
+// Upsert inserts or replaces a pin by its virtual path. A new pin is assigned a
+// stable sequence ID; re-upserting the same path preserves it.
+func (s *Store) Upsert(_ context.Context, p Pin) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(pinsBucket)
+		key := []byte(p.VirtualPath)
+		if existing := b.Get(key); existing != nil {
+			var old Pin
+			if err := json.Unmarshal(existing, &old); err == nil {
+				p.ID = old.ID
+			}
+		} else if p.ID == 0 {
+			seq, err := b.NextSequence()
+			if err != nil {
+				return err
+			}
+			p.ID = int64(seq)
+		}
+		val, err := json.Marshal(p)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, val)
+	})
 }
 
 // ByPath returns the pin for a virtual path, or (nil, nil) if absent.
-func (s *Store) ByPath(ctx context.Context, virtualPath string) (*Pin, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, media_type, imdb_id, season, episode, title, year, quality, virtual_path, source_url, size, resolved_at
-		FROM pins WHERE virtual_path=?`, virtualPath)
-	return scanPin(row)
+func (s *Store) ByPath(_ context.Context, virtualPath string) (*Pin, error) {
+	var pin *Pin
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket(pinsBucket).Get([]byte(virtualPath))
+		if v == nil {
+			return nil
+		}
+		var p Pin
+		if err := json.Unmarshal(v, &p); err != nil {
+			return err
+		}
+		pin = &p
+		return nil
+	})
+	return pin, err
 }
 
-// UpdateResolution rewrites the source URL and size after a re-resolve.
-func (s *Store) UpdateResolution(ctx context.Context, id int64, sourceURL string, size int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE pins SET source_url=?, size=?, resolved_at=? WHERE id=?`,
-		sourceURL, size, time.Now().Unix(), id)
-	return err
+// UpdateResolution rewrites a pin's source URL and size after a re-resolve.
+func (s *Store) UpdateResolution(_ context.Context, virtualPath, sourceURL string, size int64) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(pinsBucket)
+		key := []byte(virtualPath)
+		v := b.Get(key)
+		if v == nil {
+			return fmt.Errorf("pin not found: %s", virtualPath)
+		}
+		var p Pin
+		if err := json.Unmarshal(v, &p); err != nil {
+			return err
+		}
+		p.SourceURL, p.Size, p.ResolvedAt = sourceURL, size, time.Now()
+		val, err := json.Marshal(p)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, val)
+	})
 }
 
 // Children returns the immediate directory and file names under a virtual
 // directory prefix (empty prefix = library root). dirs end without a slash.
 //
-// The subtree is selected with an index range scan rather than a full table
-// scan: every descendant of "p" sorts in [p+"/", p+"0") because '/' (0x2f)
-// immediately precedes '0' (0x30), so the UNIQUE index on virtual_path does
-// the narrowing.
-func (s *Store) Children(ctx context.Context, prefix string) (dirs, files []string, err error) {
+// Because bbolt yields keys in sorted order, the scan seeks to prefix+"/" and
+// stops at the first key that no longer shares it — no full-bucket scan.
+func (s *Store) Children(_ context.Context, prefix string) (dirs, files []string, err error) {
 	prefix = strings.Trim(prefix, "/")
-	var rows *sql.Rows
-	if prefix == "" {
-		rows, err = s.db.QueryContext(ctx, `SELECT virtual_path FROM pins ORDER BY virtual_path`)
-	} else {
-		lo, hi := prefix+"/", prefix+"0"
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT virtual_path FROM pins WHERE virtual_path >= ? AND virtual_path < ? ORDER BY virtual_path`, lo, hi)
+	scanPrefix := ""
+	if prefix != "" {
+		scanPrefix = prefix + "/"
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
 	seenDir := map[string]bool{}
 	seenFile := map[string]bool{}
-	for rows.Next() {
-		var vp string
-		if err := rows.Scan(&vp); err != nil {
-			return nil, nil, err
+	err = s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket(pinsBucket).Cursor()
+		var k []byte
+		if scanPrefix == "" {
+			k, _ = c.First()
+		} else {
+			k, _ = c.Seek([]byte(scanPrefix))
 		}
-		rest := vp
-		if prefix != "" {
-			rest = strings.TrimPrefix(vp, prefix+"/")
-		}
-		if rest == "" {
-			continue
-		}
-		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
-			name := rest[:idx]
-			if !seenDir[name] {
-				seenDir[name] = true
-				dirs = append(dirs, name)
+		for ; k != nil; k, _ = c.Next() {
+			vp := string(k)
+			if scanPrefix != "" {
+				if !strings.HasPrefix(vp, scanPrefix) {
+					break // sorted order: no further children
+				}
+				vp = strings.TrimPrefix(vp, scanPrefix)
 			}
-		} else if !seenFile[rest] {
-			seenFile[rest] = true
-			files = append(files, rest)
+			if vp == "" {
+				continue
+			}
+			if idx := strings.IndexByte(vp, '/'); idx >= 0 {
+				if name := vp[:idx]; !seenDir[name] {
+					seenDir[name] = true
+					dirs = append(dirs, name)
+				}
+			} else if !seenFile[vp] {
+				seenFile[vp] = true
+				files = append(files, vp)
+			}
 		}
-	}
-	return dirs, files, rows.Err()
-}
-
-func scanPin(row *sql.Row) (*Pin, error) {
-	var p Pin
-	var resolvedAt int64
-	err := row.Scan(&p.ID, &p.MediaType, &p.IMDbID, &p.Season, &p.Episode, &p.Title,
-		&p.Year, &p.Quality, &p.VirtualPath, &p.SourceURL, &p.Size, &resolvedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	p.ResolvedAt = time.Unix(resolvedAt, 0)
-	return &p, nil
+		return nil
+	})
+	return dirs, files, err
 }

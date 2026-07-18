@@ -63,8 +63,7 @@ func TestUpdateResolution(t *testing.T) {
 	p := Pin{MediaType: "movie", IMDbID: "tt1", Title: "M", Year: 2020, Quality: "1080p",
 		VirtualPath: "movies/M/m.mkv", SourceURL: "http://old", Size: 1, ResolvedAt: time.Now()}
 	st.Upsert(ctx, p)
-	got, _ := st.ByPath(ctx, p.VirtualPath)
-	if err := st.UpdateResolution(ctx, got.ID, "http://new", 999); err != nil {
+	if err := st.UpdateResolution(ctx, p.VirtualPath, "http://new", 999); err != nil {
 		t.Fatal(err)
 	}
 	got2, _ := st.ByPath(ctx, p.VirtualPath)
