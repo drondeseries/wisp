@@ -54,6 +54,29 @@ wisp embeds rclone and mounts the library itself — no separate rclone
 container or process. Point your media server's library at `/mnt/wisp`. Leave
 `WISP_MOUNT_PATH` unset to serve HTTP only and mount it however you like.
 
+## Instant Silo Autoscan
+
+Create one ARR-compatible webhook source in **Silo → Autoscan → Sources**, copy
+its webhook URL, and add it to wisp:
+
+```yaml
+environment:
+  WISP_SILO_WEBHOOK_URL: https://silo.example.com/api/v1/autoscan/webhooks/<secret>
+```
+
+That is the only webhook setting. wisp automatically uses
+`WISP_MOUNT_PATH` (default `/mnt/wisp`) when sending paths and notifies Silo
+for:
+
+- **Import** — immediately scans a newly pinned movie or episode.
+- **Rename** — removes the previous path and scans the replacement when a
+  re-resolve changes the virtual filename.
+- **File Delete** — removes a deleted pin from Silo's library.
+
+Webhook failures never prevent a pin or delete. Keep the AIOStreams plugin's
+Wisp Pins polling source enabled as a recovery path. Treat the webhook URL as a
+password: do not publish it in screenshots or logs, and rotate it if exposed.
+
 ## API
 
 Add an episode:
@@ -94,6 +117,7 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin database |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
+| `WISP_SILO_WEBHOOK_URL` | — | Optional Silo Autoscan webhook for instant import, rename, and delete updates |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks) |
