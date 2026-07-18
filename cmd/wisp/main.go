@@ -41,12 +41,14 @@ func main() {
 	app := &app{store: st, aio: aio, log: log, mountPath: cfg.MountPath, startedAt: time.Now()}
 
 	srv := server.New(st, app.reResolve, log)
+	app.srv = srv
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/add", app.handleAdd)
 	mux.HandleFunc("GET /api/pins", app.handleListPins)
 	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
+	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
@@ -124,6 +126,7 @@ type app struct {
 	store     *store.Store
 	aio       *aiostreams.Client
 	log       *slog.Logger
+	srv       *server.Server
 	mnt       *mount.Mount
 	mountPath string
 	startedAt time.Time
@@ -262,6 +265,27 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mounted":        a.mnt.Healthy(),
 		"mount_path":     a.mountPath,
 	})
+}
+
+func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	m := a.srv.Metrics()
+	pins, _ := a.store.Count(r.Context())
+	mounted := 0
+	if a.mnt.Healthy() {
+		mounted = 1
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	metric := func(name, help, typ string, val int64) {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
+	}
+	metric("wisp_pins", "Pinned media files.", "gauge", int64(pins))
+	metric("wisp_mounted", "FUSE mount live (1) or not (0).", "gauge", int64(mounted))
+	metric("wisp_uptime_seconds", "Process uptime.", "gauge", int64(time.Since(a.startedAt).Seconds()))
+	metric("wisp_file_requests_total", "Byte-range file requests served.", "counter", m.FileRequests)
+	metric("wisp_link_cache_hits_total", "CDN URL cache hits.", "counter", m.CacheHits)
+	metric("wisp_link_cache_misses_total", "CDN URL cache misses (permalink resolves).", "counter", m.CacheMisses)
+	metric("wisp_reresolves_total", "Self-heal re-resolves via AIOStreams.", "counter", m.ReResolves)
+	metric("wisp_link_cache_entries", "Cached CDN URLs currently held.", "gauge", int64(m.LinkCacheSize))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

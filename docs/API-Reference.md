@@ -83,6 +83,12 @@ Response: `{"deleted": ["<virtual_path>", ...]}`.
   "mounted": true, "mount_path": "/mnt/wisp" }
 ```
 
+## `GET /metrics`
+
+Prometheus text-format metrics: `wisp_pins`, `wisp_mounted`, `wisp_uptime_seconds`,
+`wisp_file_requests_total`, `wisp_link_cache_hits_total`,
+`wisp_link_cache_misses_total`, `wisp_reresolves_total`, `wisp_link_cache_entries`.
+
 ## `GET /api/healthz`
 
 `200 ok` — liveness probe.

@@ -106,8 +106,9 @@ Full docs live in [`docs/`](docs/README.md): [Architecture](docs/Architecture.md
 
 ## Status
 
-Early. The core — add, pin, serve, self-heal, and in-process mount — works.
-Watchlist sync and a status/metrics endpoint are next.
+Early but solid. The core — add/pin/serve, self-healing streams and mount,
+CDN-cached fast starts, provider-id metadata tags, `/api/status` + `/metrics` —
+works and is tested. See [docs/](docs/README.md).
 
 ## License
 

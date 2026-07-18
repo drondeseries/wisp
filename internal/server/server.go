@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/store"
@@ -48,6 +49,32 @@ type Server struct {
 	// dominates stream-start latency (ffmpeg's probe makes many small reads).
 	linkMu    sync.Mutex
 	linkCache map[string]cachedLink
+
+	// Observability counters.
+	reqServed   atomic.Int64
+	cacheHits   atomic.Int64
+	cacheMisses atomic.Int64
+	reResolves  atomic.Int64
+}
+
+// Metrics is a snapshot of server counters.
+type Metrics struct {
+	FileRequests  int64
+	CacheHits     int64
+	CacheMisses   int64
+	ReResolves    int64
+	LinkCacheSize int
+}
+
+// Metrics returns a snapshot of the server's counters.
+func (s *Server) Metrics() Metrics {
+	return Metrics{
+		FileRequests:  s.reqServed.Load(),
+		CacheHits:     s.cacheHits.Load(),
+		CacheMisses:   s.cacheMisses.Load(),
+		ReResolves:    s.reResolves.Load(),
+		LinkCacheSize: s.LinkCacheSize(),
+	}
 }
 
 // New builds a file server. The upstream client has no overall timeout — media
@@ -70,13 +97,39 @@ func New(st *store.Store, reresolve ReResolve, log *slog.Logger) *Server {
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	return &Server{
+	s := &Server{
 		store:     st,
 		reresolve: reresolve,
 		client:    &http.Client{Transport: transport},
 		log:       log,
 		linkCache: make(map[string]cachedLink),
 	}
+	go s.sweepLinks()
+	return s
+}
+
+// sweepLinks periodically drops expired CDN URLs so the cache tracks only files
+// in active use rather than growing for the process lifetime.
+func (s *Server) sweepLinks() {
+	ticker := time.NewTicker(linkTTL)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		s.linkMu.Lock()
+		for k, c := range s.linkCache {
+			if now.After(c.expires) {
+				delete(s.linkCache, k)
+			}
+		}
+		s.linkMu.Unlock()
+	}
+}
+
+// LinkCacheSize returns the number of cached CDN URLs (for observability).
+func (s *Server) LinkCacheSize() int {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	return len(s.linkCache)
 }
 
 func (s *Server) cachedLink(path string) (string, bool) {
@@ -156,11 +209,13 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 		return
 	}
 
+	s.reqServed.Add(1)
 	s.log.Debug("serving", "path", pin.VirtualPath, "range", r.Header.Get("Range"))
 
 	// 1. Fast path: reuse the cached CDN URL, skipping the permalink redirect
 	//    that dominates stream-start latency.
 	if cdn, ok := s.cachedLink(pin.VirtualPath); ok {
+		s.cacheHits.Add(1)
 		committed, retriable := s.proxyOnce(w, r, cdn, pin, false)
 		if committed {
 			return
@@ -172,6 +227,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	}
 
 	// 2. Resolve through the permalink; a successful response caches the CDN URL.
+	s.cacheMisses.Add(1)
 	committed, retriable := s.proxyOnce(w, r, pin.SourceURL, pin, true)
 	if committed {
 		return
@@ -183,6 +239,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	// 3. Permalink itself is dead → re-resolve via AIOStreams and retry once.
 	if s.reresolve != nil {
 		s.log.Warn("upstream unavailable; re-resolving", "path", pin.VirtualPath)
+		s.reResolves.Add(1)
 		if err := s.reresolve(r.Context(), pin); err != nil {
 			s.log.Error("re-resolve failed", "path", pin.VirtualPath, "error", err)
 		} else {
