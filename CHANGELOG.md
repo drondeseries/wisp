@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0](https://github.com/dreulavelle/wisp/compare/v0.7.1...v1.0.0) (2026-07-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* The POST /api/seerr webhook endpoint and the WISP_SEERR_URL / WISP_SEERR_API_KEY environment variables are removed. Overseerr/Jellyseerr can no longer feed wisp directly; drive requests through Silo (silo-plugin-wisp request_router) or POST /api/add / POST /api/monitors instead.
+
+### Features
+
+* category-aware library layout, request-shaped intake, and status API ([#12](https://github.com/dreulavelle/wisp/issues/12)) ([e95fc58](https://github.com/dreulavelle/wisp/commit/e95fc589ebf7c382506d60fafbfaffb8dd1b7a9a))
+* multi-target media-server notifications, /api/schedule, persistence warning ([#10](https://github.com/dreulavelle/wisp/issues/10)) ([ef3d25c](https://github.com/dreulavelle/wisp/commit/ef3d25c9a347cd240eba275fdb2f47ccb9db95a3))
+* remove Seerr integration for Silo-native request flow ([#13](https://github.com/dreulavelle/wisp/issues/13)) ([de5aa37](https://github.com/dreulavelle/wisp/commit/de5aa3775c0f8e8d1d7b4e69c83f85b45c516400))
+
+
+### Documentation
+
+* document VFS read chunk tuning ([#14](https://github.com/dreulavelle/wisp/issues/14)) ([e1dc993](https://github.com/dreulavelle/wisp/commit/e1dc993bf16dde4802f13fc2cb463a2ac0f8179b))
+
 ## [0.7.1](https://github.com/dreulavelle/wisp/compare/v0.7.0...v0.7.1) (2026-07-18)
 
 
