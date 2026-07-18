@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSizeEnv(t *testing.T) {
 	cases := map[string]int64{
@@ -27,5 +30,28 @@ func TestBoolEnv(t *testing.T) {
 		if got := boolEnv("WISP_TEST_BOOL", true); got != want {
 			t.Fatalf("boolEnv(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestDurationEnv(t *testing.T) {
+	t.Setenv("WISP_TEST_DUR", "90m")
+	if got := durationEnv("WISP_TEST_DUR", time.Hour); got != 90*time.Minute {
+		t.Fatalf("dur = %s", got)
+	}
+	t.Setenv("WISP_TEST_DUR", "garbage")
+	if got := durationEnv("WISP_TEST_DUR", 2*time.Hour); got != 2*time.Hour {
+		t.Fatalf("fallback = %s", got)
+	}
+}
+
+func TestListEnv(t *testing.T) {
+	t.Setenv("WISP_TEST_LIST", " us , gb ,, jp ")
+	got := listEnv("WISP_TEST_LIST", []string{"X"})
+	if len(got) != 3 || got[0] != "US" || got[2] != "JP" {
+		t.Fatalf("list = %v", got)
+	}
+	t.Setenv("WISP_TEST_LIST", "")
+	if got := listEnv("WISP_TEST_LIST", []string{"X"}); len(got) != 1 || got[0] != "X" {
+		t.Fatalf("fallback = %v", got)
 	}
 }

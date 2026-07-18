@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds everything Wisp needs to serve a resolver-backed library.
@@ -38,6 +39,20 @@ type Config struct {
 	ReadChunkSize int64
 	// ReadChunkSizeLimit caps the chunk ramp in bytes.
 	ReadChunkSizeLimit int64
+
+	// SeerrURL is the base URL of an Overseerr/Jellyseerr instance. When set,
+	// wisp accepts its request webhooks and can query it for request details.
+	SeerrURL string
+	// SeerrAPIKey authenticates wisp's calls back to the Seerr API.
+	SeerrAPIKey string
+	// ScheduleInterval is the fallback ceiling for the monitor loop; the
+	// scheduler otherwise wakes near a monitored item's next known air/release.
+	ScheduleInterval time.Duration
+	// TMDBAPIKey enables home-media release gating via TMDB (v3 key or v4 token).
+	TMDBAPIKey string
+	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
+	// physical release dates gate movies (any market releasing makes it eligible).
+	TMDBMarkets []string
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -56,11 +71,49 @@ func Load() (*Config, error) {
 		LogLevel:           strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 		ReadChunkSize:      sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit: sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
+		SeerrURL:           strings.TrimSpace(strings.TrimRight(os.Getenv("WISP_SEERR_URL"), "/")),
+		SeerrAPIKey:        strings.TrimSpace(os.Getenv("WISP_SEERR_API_KEY")),
+		ScheduleInterval:   durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
+		TMDBAPIKey:         strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
+		TMDBMarkets:        listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
 	}
 	return c, nil
+}
+
+// durationEnv parses a Go duration like "2h" or "90m", falling back on empty or
+// unparseable input. A non-positive duration also falls back.
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+// listEnv parses a comma-separated list, upper-casing and trimming each entry
+// (markets are ISO-3166-1 codes). Empty input yields the fallback.
+func listEnv(key string, fallback []string) []string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.ToUpper(strings.TrimSpace(part)); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 // sizeEnv parses a byte size like "16M", "512M", "1G", or a plain byte count,
