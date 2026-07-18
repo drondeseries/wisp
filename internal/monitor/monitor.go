@@ -1,8 +1,9 @@
 // Package monitor keeps a persistent watchlist of titles wisp can't pin yet —
 // unreleased movies and ongoing series — and pins them as they become available.
 //
-// It is push-first everywhere it can be: intake is webhook-driven (see the seerr
-// package) and the media server is notified by webhook. The one thing nothing
+// It is push-first everywhere it can be: intake is request-driven (Silo's
+// request router via the request-shaped /api/add, or POST /api/monitors) and the
+// media server is notified by webhook. The one thing nothing
 // pushes is "a new episode aired / is now seedable", so the scheduler handles
 // that — but it wakes near a known next airstamp rather than polling blindly,
 // with the configured interval only as a fallback ceiling.
@@ -45,7 +46,7 @@ type Target struct {
 	Category  string // library root decided for the title; inherited by the pin
 }
 
-// Request is an intake from a feeder (Seerr, the request-shaped API): a movie or
+// Request is an intake from a feeder (the request-shaped API): a movie or
 // a whole series, at zero or more requested quality tiers.
 type Request struct {
 	MediaType string
@@ -415,7 +416,7 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passRes
 		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error()}
 	}
 	if len(it.Seasons) > 0 {
-		all = filterSeasons(all, it.Seasons) // honor a per-season Seerr request
+		all = filterSeasons(all, it.Seasons) // honor a per-season request
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {

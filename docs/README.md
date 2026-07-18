@@ -22,7 +22,7 @@ does all the finding, ranking, filtering, and parsing. wisp glues the two.
 - **[Configuration](Configuration.md)** — every environment variable
 - **[API Reference](API-Reference.md)** — endpoints, payloads, responses
 - **[Deployment](Deployment.md)** — compose, mount propagation, per-server library setup
-- **[Feeding wisp](Feeding-wisp.md)** — how content gets in (plugin, Seerr, arrs, direct)
+- **[Feeding wisp](Feeding-wisp.md)** — how content gets in (Silo request router, plugin, direct)
 - **[Troubleshooting](Troubleshooting.md)** — common issues
 
 ## In one breath

@@ -1,4 +1,4 @@
-# wisp — a standalone request-to-playback engine (Seerr + wisp + AIOStreams).
+# wisp — a standalone request-to-playback engine (Silo + wisp + AIOStreams).
 #
 #   1. cp .env.example .env    # then edit .env (AIOStreams URL + password required)
 #   2. share the host mountpoint once so wisp's FUSE mount reaches the host:

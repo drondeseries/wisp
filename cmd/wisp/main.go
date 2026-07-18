@@ -24,7 +24,6 @@ import (
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/mount"
 	"github.com/dreulavelle/wisp/internal/notify"
-	"github.com/dreulavelle/wisp/internal/seerr"
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
 	"github.com/rclone/rclone/fs"
@@ -73,7 +72,6 @@ func main() {
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
 		webhook:   notifier,
 		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets),
-		seerr:     seerr.New(cfg.SeerrURL, cfg.SeerrAPIKey),
 		startedAt: time.Now(),
 	}
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, log)
@@ -91,7 +89,6 @@ func main() {
 	mux.HandleFunc("POST /api/add", app.handleAdd)
 	mux.HandleFunc("GET /api/pins", app.handleListPins)
 	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
-	mux.HandleFunc("POST /api/seerr", app.handleSeerrWebhook)
 	mux.HandleFunc("POST /api/monitors", app.handleCreateMonitor)
 	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
 	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
@@ -183,7 +180,6 @@ type app struct {
 	webhook   notify.Notifier
 	meta      *metadata.Service
 	mon       *monitor.Monitor
-	seerr     *seerr.Client
 	mountPath string
 	startedAt time.Time
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete

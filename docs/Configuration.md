@@ -9,8 +9,6 @@ All configuration is via environment variables.
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address. |
 | `WISP_DB_PATH` | `/data/wisp.db` | bbolt database for pins **and** monitors. Persist this (a volume) to keep your library and watchlist across restarts. |
 | `WISP_MOUNT_PATH` | — | If set, wisp self-mounts the library here (needs `/dev/fuse` + `SYS_ADMIN`). Unset = serve HTTP only and mount it yourself. |
-| `WISP_SEERR_URL` | — | Overseerr/Jellyseerr base URL. Set it so wisp can read a request's seasons and 4K flag authoritatively from the Seerr API (the webhook alone underspecifies them). |
-| `WISP_SEERR_API_KEY` | — | Seerr API key, for the enrichment above. |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Fallback ceiling for the monitor loop. The scheduler otherwise wakes near a monitored item's next known airstamp/release — it doesn't poll on a fixed tick. |
 | `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token. Enables home-media release gating for movies (digital/physical dates); without it, wisp falls back to Cinemeta's release date. |
 | `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | ISO-3166-1 regions whose TMDB digital/physical release makes a movie eligible (any one releasing counts). |

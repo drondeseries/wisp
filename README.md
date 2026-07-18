@@ -9,10 +9,15 @@ never downloads anything — each virtual file's bytes are range-proxied from th
 resolved stream on demand. Point any media server (Silo, Plex, Jellyfin, Emby)
 at the mount and it scans, probes, and plays them like local files.
 
-Point [Overseerr/Jellyseerr](https://github.com/seerr-team/seerr) at wisp and the
-whole stack is just **Seerr + wisp + AIOStreams** — no `*arr` apps, no download
-client, no media-server plugin. Seerr owns requests, approvals, and users; wisp
-owns release scheduling, stream resolution, and the virtual library.
+The whole stack is just **Silo + wisp + AIOStreams** — no `*arr` apps, no
+download client, no separate request UI. Silo owns requests, approvals, users,
+and the availability/notification surface; wisp owns release scheduling, stream
+resolution, and the virtual library; AIOStreams owns stream selection. Silo
+routes each approved request to wisp through the **silo-plugin-wisp**
+`request_router` shim (a companion project), wisp fulfills it and serves the
+result under `/mnt/wisp`, and wisp pings Silo's autoscan webhook so the new file
+imports the moment it's pinned. Availability and user notifications are
+presence-gated in Silo — it only surfaces a title once the file is really there.
 
 > **AIOStreams is required.** wisp talks to AIOStreams' Search API directly (not
 > the generic Stremio addon protocol). That's the point of leverage, not a limit:
@@ -22,12 +27,14 @@ owns release scheduling, stream resolution, and the virtual library.
 
 ## How it works
 
-- **Request.** A user approves a request in Seerr; its webhook hits wisp. wisp
+- **Request.** A user approves a request in Silo; the silo-plugin-wisp
+  `request_router` shim routes it to wisp's request-shaped `/api/add`. wisp
   checks eligibility (home-media release for movies, aired episodes for series),
   pins what's available now, and **monitors** the rest.
 - **Monitor.** wisp keeps a persistent watchlist and pins unreleased movies and
   newly-aired episodes as they land — waking near the next airstamp, not polling
-  blindly. (Or feed it directly via the [API](#api); Seerr is optional.)
+  blindly. (Silo polls `GET /api/requests/status` for authoritative state; you
+  can also feed wisp directly via the [API](#api).)
 - **Mount.** wisp self-mounts with embedded rclone; pins appear under four
   category roots — `movies/`, `shows/`, `anime_movies/`, `anime_shows/` — that
   any media server scans (see [Library layout](#library-layout)).
@@ -288,45 +295,19 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 
 ### Requests & monitoring
 
-In Seerr → **Settings → Notifications → Webhook**, set the **Webhook URL** to
-`http://<wisp-host>:8080/api/seerr`, enable **Request Approved** + **Request
-Automatically Approved**, and use this JSON payload:
+Requests come from **Silo**. Its native request system routes each approved
+request to wisp through the **silo-plugin-wisp** `request_router` shim (a
+companion project), which calls wisp's request-shaped
+[`/api/add`](#request-shaped-add-async-intake) with the title's ids and requested
+quality tiers. Series requests are whole-series (Silo's request contract carries
+no season scoping); wisp enumerates the episodes itself, resolves what's aired,
+pins it, and monitors the rest. Per-season scoping remains available directly
+via [`/api/monitors`](#monitors). Silo polls [`GET /api/requests/status`](#request-status)
+for authoritative per-title state and only surfaces the title to its users (and
+fires their notifications) once the files are really present — availability is
+presence-gated, so nothing shows up before it can actually play.
 
-```json
-{
-  "notification_type": "{{notification_type}}",
-  "subject": "{{subject}}",
-  "media": {
-    "media_type": "{{media_type}}",
-    "tmdbId": "{{media_tmdbid}}",
-    "tvdbId": "{{media_tvdbid}}",
-    "imdbId": "{{media_imdbid}}"
-  },
-  "request": { "request_id": "{{request_id}}" }
-}
-```
-
-On approval wisp resolves the movie/series, pins what's aired, and monitors the
-rest.
-
-**`WISP_SEERR_URL` / `WISP_SEERR_API_KEY` are optional but recommended.** wisp
-never polls Seerr — the webhook is the push. The catch is that the webhook can't
-reliably carry two things: whether a request is **4K** (Overseerr exposes no
-per-request 4K field in its webhook at all) and, depending on your Overseerr
-version/template, the requested **seasons**. So when a webhook arrives, wisp makes
-**one reactive call back to the Seerr API** to read that request's authoritative
-`is4k` + seasons. That's the *only* thing the credentials do — there are no other
-API calls, and nothing is polled.
-
-Without them wisp still works, with two degradations:
-
-- every request is treated as **1080p** (no HD/4K split), and
-- a request fulfills the **whole show** rather than the specific seasons asked for.
-
-Set them if you want the 4K tier split or per-season scoping; leave them blank if
-you don't care about either.
-
-You can also drive monitoring directly (Seerr optional):
+You can also drive monitoring directly — no request router required:
 
 ```sh
 # monitor a title (media-server-neutral)
@@ -369,8 +350,6 @@ requested `qualities`/`seasons`, how many files are `pinned`, and
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin + monitor database (persist this) |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
-| `WISP_SEERR_URL` | — | Optional but recommended. Overseerr/Jellyseerr base URL — only used to read a request's 4K flag + seasons back (reactively, per webhook; never polled). Blank = all requests treated as 1080p, whole-show |
-| `WISP_SEERR_API_KEY` | — | Optional but recommended. Seerr API key for the enrichment above |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Monitor re-check ceiling (it wakes near the next airstamp regardless) |
 | `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token — enables home-media release gating for movies |
 | `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | Regions whose digital/physical dates release a movie |

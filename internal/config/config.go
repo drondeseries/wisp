@@ -56,11 +56,6 @@ type Config struct {
 	// ReadChunkSizeLimit caps the chunk ramp in bytes.
 	ReadChunkSizeLimit int64
 
-	// SeerrURL is the base URL of an Overseerr/Jellyseerr instance. When set,
-	// wisp accepts its request webhooks and can query it for request details.
-	SeerrURL string
-	// SeerrAPIKey authenticates wisp's calls back to the Seerr API.
-	SeerrAPIKey string
 	// ScheduleInterval is the fallback ceiling for the monitor loop; the
 	// scheduler otherwise wakes near a monitored item's next known air/release.
 	ScheduleInterval time.Duration
@@ -94,8 +89,6 @@ func Load() (*Config, error) {
 		LogLevel:             strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 		ReadChunkSize:        sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
-		SeerrURL:             strings.TrimSpace(strings.TrimRight(os.Getenv("WISP_SEERR_URL"), "/")),
-		SeerrAPIKey:          strings.TrimSpace(os.Getenv("WISP_SEERR_API_KEY")),
 		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),

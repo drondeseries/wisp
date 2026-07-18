@@ -82,8 +82,8 @@ func selectHomeRelease(payload tmdbReleaseDates, markets []string) (time.Time, b
 	return earliest, !earliest.IsZero()
 }
 
-// IMDbForTMDB resolves a TMDB id to its IMDb id via /external_ids. Seerr sends
-// only TMDB ids, but Cinemeta (canonical episode numbering) is IMDb-keyed.
+// IMDbForTMDB resolves a TMDB id to its IMDb id via /external_ids. Requests may
+// carry only a TMDB id, but Cinemeta (canonical episode numbering) is IMDb-keyed.
 func (s *Service) IMDbForTMDB(ctx context.Context, mediaType, tmdbID string) (string, error) {
 	tmdbID = strings.TrimSpace(tmdbID)
 	if tmdbID == "" || s.tmdbKey == "" {

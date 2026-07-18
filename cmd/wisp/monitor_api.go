@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/monitor"
-	"github.com/dreulavelle/wisp/internal/seerr"
 )
 
 // Pin implements monitor.Fulfiller: resolve+pin one target. pinned=false means
@@ -44,42 +42,6 @@ func (a *app) PinnedKeys(ctx context.Context, imdbID string) (map[monitor.PinKey
 	return keys, nil
 }
 
-// handleSeerrWebhook ingests an Overseerr/Jellyseerr request webhook. Approvals
-// are enriched from the Seerr API (authoritative 4K/seasons/title) and handed to
-// the monitor, which pins what's available now and tracks the rest.
-func (a *app) handleSeerrWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
-		return
-	}
-	in, actionable, err := seerr.ParseWebhook(body)
-	if err != nil {
-		a.log.Warn("seerr webhook parse", "error", err)
-		http.Error(w, "invalid webhook", http.StatusBadRequest)
-		return
-	}
-	if !actionable {
-		w.WriteHeader(http.StatusOK) // test ping / non-approval event
-		return
-	}
-	if err := a.seerr.Enrich(r.Context(), in); err != nil {
-		// Proceed on webhook data, but say so loudly: 4K intent and seasons are
-		// then guesses (standard / all seasons). A re-request corrects them.
-		a.log.Warn("seerr enrichment failed; using webhook data (4K/seasons may be inexact)", "title", in.Title, "error", err)
-	}
-	if err := a.mon.Intake(r.Context(), monitor.Request{
-		MediaType: in.MediaType, IMDbID: in.IMDbID, TMDbID: in.TMDbID, TVDbID: in.TVDbID,
-		Title: in.Title, Year: in.Year, Qualities: in.Qualities(), Seasons: in.Seasons,
-	}); err != nil {
-		a.log.Warn("seerr intake", "title", in.Title, "error", err)
-		http.Error(w, "intake failed", http.StatusInternalServerError)
-		return
-	}
-	a.log.Info("seerr request accepted", "media_type", in.MediaType, "title", in.Title, "4k", in.Is4K)
-	w.WriteHeader(http.StatusAccepted)
-}
-
 type monitorRequest struct {
 	MediaType string   `json:"media_type"`
 	IMDbID    string   `json:"imdb_id"`
@@ -92,7 +54,7 @@ type monitorRequest struct {
 }
 
 // handleCreateMonitor registers a monitor directly (media-server-neutral, no
-// Seerr required) — POST /api/monitors.
+// request tool required) — POST /api/monitors.
 func (a *app) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 	var req monitorRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {

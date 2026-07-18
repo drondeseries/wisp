@@ -15,7 +15,6 @@ import (
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/notify"
-	"github.com/dreulavelle/wisp/internal/seerr"
 	"github.com/dreulavelle/wisp/internal/store"
 )
 
@@ -36,7 +35,6 @@ func offlineApp(t *testing.T) *app {
 	a := &app{
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(stub.URL, stub.URL, stub.URL)),
-		seerr:   seerr.New("", ""),
 		webhook: notify.New(notify.Options{}, log),
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, log)
@@ -358,7 +356,6 @@ func TestIntakeDoesNotBlockOnMetadata(t *testing.T) {
 	a := &app{
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(slow.URL, slow.URL, slow.URL)),
-		seerr:   seerr.New("", ""),
 		webhook: notify.New(notify.Options{}, log),
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, log)

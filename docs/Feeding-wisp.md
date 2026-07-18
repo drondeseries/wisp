@@ -24,7 +24,15 @@ scheduled refresh, queries `GET /api/pins` to add only genuinely new episodes.
 This makes the plugin — and your whole Silo request flow — work on **unmodified
 Silo**, with wisp providing durable, self-healing playback.
 
-### 2. Overseerr / Jellyseerr / any request tool
+### 2. Silo's native request router
+
+In the Silo-native stack this is the primary path: Silo's request system routes
+each approved request to wisp through the **silo-plugin-wisp** `request_router`
+shim (a companion project), which POSTs the request-shaped `/api/add` — ids,
+quality tiers, and (for series) seasons. There's no template to hand-write; the
+shim owns the mapping, and Silo polls `GET /api/requests/status` for state.
+
+### 3. Any request tool or webhook
 
 Anything that can fire a webhook can feed wisp. Map the request's IDs to an
 `/api/add` call:
@@ -35,11 +43,9 @@ curl -X POST http://wisp:8080/api/add -d "{
 }"
 ```
 
-### 3. Sonarr / Radarr (or a script)
-
-Use a custom "connect" / webhook, or a small script on a cron, that turns
-monitored/wanted items into `/api/add` calls. wisp de-dupes by virtual path, so
-re-adding is cheap; use `GET /api/pins` to skip what's already there.
+A small script on a cron works the same way — turn monitored/wanted items into
+`/api/add` calls. wisp de-dupes by virtual path, so re-adding is cheap; use
+`GET /api/pins` to skip what's already there.
 
 ### 4. Directly / by hand
 
