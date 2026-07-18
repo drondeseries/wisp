@@ -20,9 +20,16 @@ type Config struct {
 	ListenAddr string
 	// DBPath is where the pin database lives.
 	DBPath string
-	// PublicURL, when set, is logged as the URL to point rclone at.
-	PublicURL string
+	// MountPath, when set, makes wisp self-mount the library there via the
+	// embedded rclone VFS. Empty = serve HTTP only (mount it yourself).
+	MountPath string
+	// MountAllowOther exposes the mount to other users (needed when another
+	// container reads the mount as a different UID).
+	MountAllowOther bool
 }
+
+// SelfMount reports whether wisp should mount the library itself.
+func (c *Config) SelfMount() bool { return c.MountPath != "" }
 
 // Load reads configuration from environment variables and validates it.
 func Load() (*Config, error) {
@@ -31,7 +38,8 @@ func Load() (*Config, error) {
 		AIOStreamsPassword: os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
 		ListenAddr:         envOr("WISP_LISTEN_ADDR", ":8080"),
 		DBPath:             envOr("WISP_DB_PATH", "/data/wisp.db"),
-		PublicURL:          strings.TrimSpace(os.Getenv("WISP_PUBLIC_URL")),
+		MountPath:          strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
+		MountAllowOther:    boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
@@ -44,4 +52,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func boolEnv(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }

@@ -9,11 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 	"github.com/dreulavelle/wisp/internal/config"
 	"github.com/dreulavelle/wisp/internal/library"
+	"github.com/dreulavelle/wisp/internal/mount"
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
 )
@@ -46,14 +50,54 @@ func main() {
 	})
 	mux.HandleFunc("/", srv.FileHandler)
 
-	if cfg.PublicURL != "" {
-		log.Info("point rclone here", "url", cfg.PublicURL)
+	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
+	go func() {
+		log.Info("wisp listening", "addr", cfg.ListenAddr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("serve", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	var mnt *mount.Mount
+	if cfg.SelfMount() {
+		m, err := mount.Start(context.Background(), mount.Options{
+			ServerURL:          "http://127.0.0.1" + portOf(cfg.ListenAddr),
+			Mountpoint:         cfg.MountPath,
+			AllowOther:         cfg.MountAllowOther,
+			ReadChunkSize:      32 << 20,  // 32M first read: snappy seeks
+			ReadChunkSizeLimit: 512 << 20, // ramp for sequential playback
+		}, log)
+		if err != nil {
+			log.Error("self-mount failed", "error", err)
+			os.Exit(1)
+		}
+		mnt = m
+	} else {
+		log.Info("serving HTTP only; mount it with rclone (set WISP_MOUNT_PATH to self-mount)")
 	}
-	log.Info("wisp listening", "addr", cfg.ListenAddr)
-	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
-		log.Error("serve", "error", err)
-		os.Exit(1)
+
+	// Graceful shutdown: unmount before exit so the mountpoint isn't left stale.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	log.Info("shutting down")
+	if mnt != nil {
+		if err := mnt.Close(); err != nil {
+			log.Warn("unmount", "error", err)
+		}
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// portOf extracts ":8080" from a listen address like ":8080" or "0.0.0.0:8080".
+func portOf(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[i:]
+	}
+	return ":8080"
 }
 
 type app struct {

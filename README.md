@@ -36,16 +36,21 @@ services:
       - "8080:8080"
 ```
 
-Mount it:
-
-```sh
-rclone mount :http: /mnt/wisp --http-url http://wisp:8080 --read-only --vfs-cache-mode off
+```yaml
+    # add to the service above to self-mount:
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      WISP_MOUNT_PATH: /mnt/wisp        # wisp mounts itself here
+    volumes:
+      - /mnt/wisp:/mnt/wisp:rshared     # propagate the mount to the host
 ```
 
-Then point your media server's library at `/mnt/wisp`.
-
-> In-process rclone (no separate mount step) is on the way — wisp will mount
-> itself.
+wisp embeds rclone and mounts the library itself — no separate rclone
+container or process. Point your media server's library at `/mnt/wisp`. Leave
+`WISP_MOUNT_PATH` unset to serve HTTP only and mount it however you like.
 
 ## API
 
@@ -73,11 +78,13 @@ Add a movie: `"media_type": "movie"`, omit `season`/`episode`.
 | `WISP_AIOSTREAMS_PASSWORD` | — | Addon password |
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin database |
+| `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
+| `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 
 ## Status
 
-Early. The core — add, pin, serve, self-heal — works. Embedded rclone, watchlist
-sync, and a status/metrics endpoint are next.
+Early. The core — add, pin, serve, self-heal, and in-process mount — works.
+Watchlist sync and a status/metrics endpoint are next.
 
 ## License
 
