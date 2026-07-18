@@ -63,8 +63,10 @@ rotated if it is exposed.
 wisp embeds rclone's VFS with sensible defaults for streaming: cache **off**
 (pure passthrough, no local disk), a 32 MiB initial read chunk that ramps to
 512 MiB for efficient sequential playback while keeping seeks snappy, and a
-short directory cache. These aren't env-configurable yet; open an issue if you
-need to tune them.
+short directory cache. Set `WISP_READ_CHUNK_SIZE` (default `32M`) to tune the
+initial chunk and `WISP_READ_CHUNK_SIZE_LIMIT` (default `512M`) to cap the ramp.
+Smaller chunks reduce over-fetch after seeks; larger chunks favor sequential
+throughput.
 
 See [Deployment](Deployment.md) for the `/dev/fuse`, `SYS_ADMIN`, and mount
 propagation requirements.
