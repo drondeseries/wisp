@@ -16,6 +16,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/store"
@@ -25,12 +26,28 @@ import (
 // AIOStreams) when its current upstream fails. It persists the new values.
 type ReResolve func(ctx context.Context, p *store.Pin) error
 
+// linkTTL bounds how long a resolved CDN URL is reused before it's re-resolved
+// through the permalink. Debrid links stay valid well past this; the cap only
+// bounds staleness.
+const linkTTL = 15 * time.Minute
+
+type cachedLink struct {
+	url     string
+	expires time.Time
+}
+
 // Server is the virtual-file HTTP handler.
 type Server struct {
 	store     *store.Store
 	reresolve ReResolve
 	client    *http.Client
 	log       *slog.Logger
+
+	// linkCache maps a virtual path to the CDN URL its permalink last resolved
+	// to. Reusing it skips the per-request torrentio/AIOStreams redirect, which
+	// dominates stream-start latency (ffmpeg's probe makes many small reads).
+	linkMu    sync.Mutex
+	linkCache map[string]cachedLink
 }
 
 // New builds a file server. The upstream client has no overall timeout — media
@@ -58,7 +75,29 @@ func New(st *store.Store, reresolve ReResolve, log *slog.Logger) *Server {
 		reresolve: reresolve,
 		client:    &http.Client{Transport: transport},
 		log:       log,
+		linkCache: make(map[string]cachedLink),
 	}
+}
+
+func (s *Server) cachedLink(path string) (string, bool) {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	if c, ok := s.linkCache[path]; ok && time.Now().Before(c.expires) {
+		return c.url, true
+	}
+	return "", false
+}
+
+func (s *Server) storeLink(path, cdnURL string) {
+	s.linkMu.Lock()
+	s.linkCache[path] = cachedLink{url: cdnURL, expires: time.Now().Add(linkTTL)}
+	s.linkMu.Unlock()
+}
+
+func (s *Server) invalidateLink(path string) {
+	s.linkMu.Lock()
+	delete(s.linkCache, path)
+	s.linkMu.Unlock()
 }
 
 // FileHandler serves the virtual tree. Mount it as the catch-all route.
@@ -119,42 +158,58 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 
 	s.log.Debug("serving", "path", pin.VirtualPath, "range", r.Header.Get("Range"))
 
-	// One retry: if the pinned upstream is gone, re-resolve and try again.
-	for attempt := 0; attempt < 2; attempt++ {
-		ok, retriable, status := s.proxyOnce(w, r, pin)
-		if ok {
-			if attempt > 0 {
-				s.log.Info("recovered after re-resolve", "path", pin.VirtualPath)
-			}
+	// 1. Fast path: reuse the cached CDN URL, skipping the permalink redirect
+	//    that dominates stream-start latency.
+	if cdn, ok := s.cachedLink(pin.VirtualPath); ok {
+		committed, retriable := s.proxyOnce(w, r, cdn, pin, false)
+		if committed {
 			return
 		}
-		if !retriable || s.reresolve == nil {
-			if !retriable {
-				return // client gone or unrecoverable; nothing to report
-			}
-			break
+		if !retriable {
+			return // client gone mid-request
 		}
-		s.log.Warn("upstream unavailable; re-resolving", "path", pin.VirtualPath, "upstream_status", status)
+		s.invalidateLink(pin.VirtualPath) // stale/expired CDN URL
+	}
+
+	// 2. Resolve through the permalink; a successful response caches the CDN URL.
+	committed, retriable := s.proxyOnce(w, r, pin.SourceURL, pin, true)
+	if committed {
+		return
+	}
+	if !retriable {
+		return
+	}
+
+	// 3. Permalink itself is dead → re-resolve via AIOStreams and retry once.
+	if s.reresolve != nil {
+		s.log.Warn("upstream unavailable; re-resolving", "path", pin.VirtualPath)
 		if err := s.reresolve(r.Context(), pin); err != nil {
 			s.log.Error("re-resolve failed", "path", pin.VirtualPath, "error", err)
-			break
+		} else {
+			s.invalidateLink(pin.VirtualPath)
+			if committed, _ := s.proxyOnce(w, r, pin.SourceURL, pin, true); committed {
+				s.log.Info("recovered after re-resolve", "path", pin.VirtualPath)
+				return
+			}
 		}
 	}
 	s.log.Error("stream unavailable after re-resolve", "path", pin.VirtualPath)
 	http.Error(w, "stream temporarily unavailable", http.StatusBadGateway)
 }
 
-// proxyOnce streams the upstream once. ok reports success (response written);
-// retriable reports whether a re-resolve is worth attempting. Once headers have
-// been written to w, retriable is false — the response is already committed.
+// proxyOnce streams upstreamURL once. committed reports the response was written
+// to the client (success); retriable reports whether the failure is worth
+// another upstream. When cacheResolved is set, a successful response caches the
+// final URL (after redirects) as the pin's CDN URL, so later reads skip the
+// permalink hop.
 //
 // The request rides the client's context (the player's connection); there is no
 // artificial body deadline, so playback and long seeks are never truncated.
 // Stuck upstreams are caught by the transport's connect/header timeouts.
-func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pin) (ok, retriable bool, status int) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, pin.SourceURL, nil)
+func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, upstreamURL string, pin *store.Pin, cacheResolved bool) (committed, retriable bool) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 	if err != nil {
-		return false, false, 0
+		return false, false
 	}
 	req.Header.Set("User-Agent", "wisp")
 	if rng := r.Header.Get("Range"); rng != "" {
@@ -163,12 +218,19 @@ func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	resp, err := s.client.Do(req)
 	if err != nil {
 		// Client gone: don't burn a re-resolve on a cancelled request.
-		return false, r.Context().Err() == nil, 0
+		return false, r.Context().Err() == nil
 	}
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone ||
 		resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
 		resp.Body.Close()
-		return false, true, resp.StatusCode
+		return false, true
+	}
+	// Cache the resolved CDN URL (final request URL after any redirects) so
+	// subsequent reads for this file bypass the permalink.
+	if cacheResolved && resp.Request != nil && resp.Request.URL != nil {
+		if final := resp.Request.URL.String(); final != "" && final != upstreamURL {
+			s.storeLink(pin.VirtualPath, final)
+		}
 	}
 	// Commit: mirror upstream status and content headers, then stream.
 	copyHeader(w.Header(), resp.Header, "Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
@@ -184,7 +246,7 @@ func (s *Server) proxyOnce(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	if copyErr != nil {
 		s.log.Debug("client stream ended", "path", pin.VirtualPath, "error", copyErr)
 	}
-	return true, false, resp.StatusCode
+	return true, false
 }
 
 func copyHeader(dst, src http.Header, keys ...string) {

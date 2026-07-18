@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -302,5 +303,51 @@ func TestMethodNotAllowed(t *testing.T) {
 	srv.FileHandler(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestCDNLinkCacheSkipsRedirect proves the latency fix: the first read follows
+// the permalink's redirect to the CDN and caches it; subsequent reads hit the
+// CDN directly, so the permalink is touched only once.
+func TestCDNLinkCacheSkipsRedirect(t *testing.T) {
+	var permalinkHits, cdnHits int
+	var mu sync.Mutex
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cdnHits++
+		mu.Unlock()
+		w.Header().Set("Content-Range", "bytes 0-3/16")
+		w.WriteHeader(http.StatusPartialContent)
+		io.WriteString(w, "data")
+	}))
+	defer cdn.Close()
+	permalink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		permalinkHits++
+		mu.Unlock()
+		http.Redirect(w, r, cdn.URL+"/file.mkv", http.StatusFound)
+	}))
+	defer permalink.Close()
+
+	st := newTestStore(t)
+	pin := pinEpisode(t, st, permalink.URL, 16)
+	srv := New(st, nil, discard())
+
+	for i := 0; i < 4; i++ {
+		req := getReq(pin.VirtualPath)
+		req.Header.Set("Range", "bytes=0-3")
+		rec := httptest.NewRecorder()
+		srv.FileHandler(rec, req)
+		if rec.Code != http.StatusPartialContent || rec.Body.String() != "data" {
+			t.Fatalf("read %d: code=%d body=%q", i, rec.Code, rec.Body.String())
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if permalinkHits != 1 {
+		t.Fatalf("permalink hit %d times, want 1 (cache should skip it after first)", permalinkHits)
+	}
+	if cdnHits != 4 {
+		t.Fatalf("cdn hit %d times, want 4", cdnHits)
 	}
 }
