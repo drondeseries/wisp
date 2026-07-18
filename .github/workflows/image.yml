@@ -2,12 +2,9 @@ name: Image
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-  # release-please creates tags via GITHUB_TOKEN, which don't fire `push`; the
-  # published Release does fire this, so semver images still build.
-  release:
-    types: [published]
+    branches: [main]      # → edge
+    tags: ['v*']          # manual tags → semver + latest
+  workflow_dispatch:      # manual rebuild of any ref (release-please builds are in release-please.yml)
 
 jobs:
   image:
