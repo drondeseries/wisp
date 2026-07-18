@@ -184,8 +184,8 @@ curl -X POST http://localhost:8080/api/monitors/refresh      # re-check now
 
 | Env | Default | Notes |
 |-----|---------|-------|
-| `WISP_AIOSTREAMS_URL` | — | AIOStreams manifest URL (required) |
-| `WISP_AIOSTREAMS_PASSWORD` | — | Addon password |
+| `WISP_AIOSTREAMS_URL` | — | **Required.** Your AIOStreams manifest URL (the uuid is read from it automatically) |
+| `WISP_AIOSTREAMS_PASSWORD` | — | Your AIOStreams password. Required for the Search API's Basic auth **unless** your instance enables `allowUnauthenticatedSearchApiRequests` |
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin + monitor database (persist this) |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |

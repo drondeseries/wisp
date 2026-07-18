@@ -20,9 +20,19 @@ All configuration is via environment variables.
 
 ## AIOStreams URL & auth
 
-wisp uses the AIOStreams **Search API** (`/api/v1/search`), which requires the
-UUID + password. wisp derives the UUID from the `/stremio/<uuid>/…` path of the
-manifest URL and pairs it with `WISP_AIOSTREAMS_PASSWORD`.
+You only fill in two things: `WISP_AIOSTREAMS_URL` (your manifest URL) and
+`WISP_AIOSTREAMS_PASSWORD` (your AIOStreams password).
+
+wisp uses the AIOStreams **Search API** (`/api/v1/search`), which authenticates
+with HTTP Basic auth (`uuid:password`). wisp reads the **UUID from the
+`/stremio/<uuid>/…` path** of the manifest URL automatically and pairs it with
+`WISP_AIOSTREAMS_PASSWORD` — so the password is all you supply.
+
+The password is required **unless** your AIOStreams instance has
+`allowUnauthenticatedSearchApiRequests` enabled (check the instance's status
+endpoint) — then you can leave `WISP_AIOSTREAMS_PASSWORD` unset. With auth
+required and no password, wisp logs a startup warning and every add returns
+`aiostreams_auth`.
 
 > The alias form (`ALIASED_CONFIGURATIONS`) works for the manifest path, but the
 > Search API expects the real UUID — use the full `/stremio/<uuid>/<config>/…`

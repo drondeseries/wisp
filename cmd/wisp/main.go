@@ -46,7 +46,7 @@ func main() {
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
 	if !aio.HasCredentials() {
-		log.Warn("no AIOStreams credentials derived; auth-required instances will return authentication errors — set WISP_AIOSTREAMS_PASSWORD or use a URL containing the uuid")
+		log.Warn("no AIOStreams password set; the Search API needs Basic auth unless your instance allows unauthenticated requests — set WISP_AIOSTREAMS_PASSWORD if adds return aiostreams_auth")
 	}
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
