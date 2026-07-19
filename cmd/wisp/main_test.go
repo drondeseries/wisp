@@ -217,6 +217,25 @@ func TestWriteAddErrorStatusMapping(t *testing.T) {
 	}
 }
 
+func TestNoStreamReason(t *testing.T) {
+	// The three benign "nothing to pin yet" sentinels must classify to a non-empty
+	// reason (logged at INFO, retried); anything else must return "" so it
+	// propagates as a real error rather than being silently swallowed.
+	for _, benign := range []error{errNoResults, errNoPlayable, errNoQualityMatch} {
+		if noStreamReason(benign) == "" {
+			t.Errorf("noStreamReason(%v) = \"\", want a reason", benign)
+		}
+	}
+	for _, fault := range []error{
+		errors.New("store write failed"),
+		&aiostreams.SearchError{Kind: aiostreams.KindAuth, Status: 401},
+	} {
+		if r := noStreamReason(fault); r != "" {
+			t.Errorf("noStreamReason(%v) = %q, want \"\" (real fault must propagate)", fault, r)
+		}
+	}
+}
+
 func TestQualityLabel(t *testing.T) {
 	cases := []struct {
 		resolution, filename, want, expect string

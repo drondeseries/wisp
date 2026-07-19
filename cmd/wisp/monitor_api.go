@@ -23,10 +23,32 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
-	if errors.Is(err, errNoResults) || errors.Is(err, errNoPlayable) || errors.Is(err, errNoQualityMatch) {
+	if reason := noStreamReason(err); reason != "" {
+		// Surface WHY nothing pinned, at INFO — otherwise a title that AIOStreams
+		// can't resolve (e.g. a debrid returning no playable links) just sits in
+		// "retrying" with no explanation, which looks like wisp doing nothing.
+		a.log.Info("no stream to pin yet", "reason", reason, "title", t.Title,
+			"media_type", t.MediaType, "imdb", t.IMDbID, "season", t.Season,
+			"episode", t.Episode, "quality", t.Quality)
 		return false, nil // nothing (at this quality) to pin yet
 	}
 	return false, err
+}
+
+// noStreamReason classifies an "unable to pin yet" error for logging. It returns
+// "" when err is a genuine fault (auth/rate-limit/store) that should propagate as
+// an error instead of a benign retry.
+func noStreamReason(err error) string {
+	switch {
+	case errors.Is(err, errNoResults):
+		return "AIOStreams returned no playable results (check debrid/indexer)"
+	case errors.Is(err, errNoPlayable):
+		return "results found but none were probeable"
+	case errors.Is(err, errNoQualityMatch):
+		return "no result at the requested quality"
+	default:
+		return ""
+	}
 }
 
 // PinnedKeys implements monitor.Fulfiller: what's already pinned for an id.
