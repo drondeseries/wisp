@@ -39,7 +39,7 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 			Category: root, Season: t.Season, Episode: t.Episode,
 			Title: t.Title, Year: t.Year, Quality: wantQuality, VirtualPath: vpath,
 			SourceURL: "",
-			Size:      0,
+			Size:      1,
 			ResolvedAt: time.Now(),
 		}
 
