@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -161,5 +162,80 @@ func TestSearchClassifiesInvalidCredentials400(t *testing.T) {
 	var se *SearchError
 	if !errors.As(err, &se) || se.Kind != KindAuth {
 		t.Fatalf("error = %v, want KindAuth for USER_INVALID_DETAILS", err)
+	}
+}
+
+// Within the TTL, repeated Search calls for the same unit hit AIOStreams once —
+// the cached result set serves every requested quality tier. A different unit
+// (or the same unit after expiry) issues a fresh request. Failures are never
+// cached: an errored Search must re-hit upstream on the next call.
+func TestSearchCachesWithinTTL(t *testing.T) {
+	var hits int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Write([]byte(`{"success":true,"data":{"results":[
+			{"url":"https://cdn.example/dl/4k/Show.S01E01.2160p.mkv","parsedFile":{"resolution":"2160p"}},
+			{"url":"https://cdn.example/dl/hd/Show.S01E01.1080p.mkv","parsedFile":{"resolution":"1080p"}}
+		]}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "pw")
+
+	// Two tiers of the same episode: one upstream Search, both see all results.
+	for i := 0; i < 2; i++ {
+		streams, err := c.Search(context.Background(), "series", "tt1", 1, 1)
+		if err != nil {
+			t.Fatalf("search %d: %v", i, err)
+		}
+		if len(streams) != 2 {
+			t.Fatalf("search %d: streams = %d, want 2", i, len(streams))
+		}
+	}
+	if got := atomic.LoadInt64(&hits); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1 (second tier served from cache)", got)
+	}
+
+	// A different unit is a cache miss and issues a fresh Search.
+	if _, err := c.Search(context.Background(), "series", "tt1", 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (new unit searches)", got)
+	}
+
+	// After the TTL lapses, the original unit re-searches rather than serving
+	// a stale set — drive the injectable clock past expiry.
+	c.now = func() time.Time { return time.Now().Add(2 * searchCacheTTL) }
+	if _, err := c.Search(context.Background(), "series", "tt1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 3 {
+		t.Fatalf("upstream hits = %d, want 3 (expired entry re-searched)", got)
+	}
+}
+
+// A classified failure (auth/rate-limit/transient) must never be cached as a
+// success — the next call has to re-hit upstream so a recovered instance is seen.
+func TestSearchDoesNotCacheFailures(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var hits int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt64(&hits, 1)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+
+			c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "pw")
+			for i := 0; i < 2; i++ {
+				if _, err := c.Search(context.Background(), "movie", "tt9", 0, 0); err == nil {
+					t.Fatalf("search %d: want error for HTTP %d", i, status)
+				}
+			}
+			if got := atomic.LoadInt64(&hits); got != 2 {
+				t.Fatalf("upstream hits = %d, want 2 (failure not cached)", got)
+			}
+		})
 	}
 }

@@ -12,10 +12,18 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const userAgent = "wisp"
+
+// searchCacheTTL bounds how long a Search result set is reused. It is short on
+// purpose: the monitor pins every requested quality tier of a unit back-to-back
+// within one pass (so one Search serves them all), while a small TTL still lets
+// the next scheduler pass observe newly-available streams rather than a stale
+// empty/partial result set.
+const searchCacheTTL = 45 * time.Second
 
 // ErrorKind classifies why a Search call failed so callers can distinguish a
 // genuine no-stream condition from a configuration or throttling problem.
@@ -82,6 +90,20 @@ type Client struct {
 	addonURL   string
 	basicCreds string // "uuid:password"
 	http       *http.Client
+
+	// cache de-duplicates the /api/v1/search fan-out: a single Search per
+	// (mediaType, id) serves every requested quality tier in a pass, since one
+	// AIOStreams Search already returns all resolutions. Only successful result
+	// sets are cached; classified failures are never stored.
+	cacheMu  sync.Mutex
+	cache    map[string]searchCacheEntry
+	cacheTTL time.Duration
+	now      func() time.Time // injectable clock for tests; defaults to time.Now
+}
+
+type searchCacheEntry struct {
+	streams   []Stream
+	expiresAt time.Time
 }
 
 // Stream is one playable result from the Search API. Resolution and Filename
@@ -98,6 +120,9 @@ func New(addonURL, password string) *Client {
 		addonURL:   strings.TrimSpace(addonURL),
 		basicCreds: deriveCredentials(addonURL, password),
 		http:       &http.Client{Timeout: 60 * time.Second},
+		cache:      make(map[string]searchCacheEntry),
+		cacheTTL:   searchCacheTTL,
+		now:        time.Now,
 	}
 }
 
@@ -157,6 +182,13 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 	if mediaType == "series" {
 		id = fmt.Sprintf("%s:%d:%d", imdbID, season, episode)
 	}
+	// One Search per unit serves every quality tier: the search id fully
+	// identifies the (type, title, season, episode) tuple, so a fresh unit still
+	// searches while consecutive tiers of the same unit reuse the result set.
+	cacheKey := mediaType + "|" + id
+	if streams, ok := c.cacheGet(cacheKey); ok {
+		return streams, nil
+	}
 	q := url.Values{}
 	q.Set("type", mediaType)
 	q.Set("id", id)
@@ -191,7 +223,35 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 		}
 		streams = append(streams, Stream{URL: r.URL, Filename: filenameFromResult(r), Resolution: r.ParsedFile.Resolution})
 	}
+	c.cachePut(cacheKey, streams)
 	return streams, nil
+}
+
+// cacheGet returns a cached result set for key when present and unexpired. The
+// slice is treated as immutable by callers (resolve filters into a new slice),
+// so it is safe to share across concurrent readers.
+func (c *Client) cacheGet(key string) ([]Stream, bool) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	e, ok := c.cache[key]
+	if !ok || !c.now().Before(e.expiresAt) {
+		return nil, false
+	}
+	return e.streams, true
+}
+
+// cachePut stores a successful result set under key and opportunistically prunes
+// expired entries so the map stays bounded to the units seen within a TTL window.
+func (c *Client) cachePut(key string, streams []Stream) {
+	now := c.now()
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	for k, e := range c.cache {
+		if !now.Before(e.expiresAt) {
+			delete(c.cache, k)
+		}
+	}
+	c.cache[key] = searchCacheEntry{streams: streams, expiresAt: now.Add(c.cacheTTL)}
 }
 
 // classifyFailure maps a non-200 Search response to a typed SearchError. It

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,5 +323,74 @@ func TestHandleAddQualityPinsCoexist(t *testing.T) {
 		if p, _ := st.ByPath(context.Background(), want); p == nil {
 			t.Fatalf("missing %s pin at %q", q, want)
 		}
+	}
+}
+
+// A title requested at multiple quality tiers must issue exactly ONE AIOStreams
+// Search per unit: a single Search already returns every resolution, so wisp
+// serves each tier from that one result set instead of re-searching. Both tiers
+// still pin their correct resolution, and a different unit does a fresh Search.
+func TestPinMultipleQualitiesSingleSearch(t *testing.T) {
+	var searches int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/search", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&searches, 1)
+		base := "http://" + r.Host
+		fmt.Fprintf(w, `{"success":true,"data":{"results":[
+			{"url":%q,"filename":"Film.2160p.mkv","parsedFile":{"resolution":"2160p"}},
+			{"url":%q,"filename":"Film.1080p.mkv","parsedFile":{"resolution":"1080p"}}
+		]}}`, base+"/stream/2160", base+"/stream/1080")
+	})
+	probe := func(size string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "video/x-matroska")
+			w.Header().Set("Content-Range", "bytes 0-0/"+size)
+			w.WriteHeader(http.StatusPartialContent)
+		}
+	}
+	mux.HandleFunc("/stream/2160", probe("42000000000"))
+	mux.HandleFunc("/stream/1080", probe("9000000000"))
+	backend := httptest.NewServer(mux)
+	defer backend.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "wisp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	a := &app{
+		store: st, log: slog.New(slog.DiscardHandler),
+		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
+		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
+	}
+
+	pin := func(season, episode int, quality string) {
+		t.Helper()
+		if _, _, err := a.pin(context.Background(), pinSpec{
+			MediaType: "series", IMDbID: "tt7", TMDbID: "555", // TMDbID skips Cinemeta
+			Title: "Demo", Year: 2026, Season: season, Episode: episode, Quality: quality,
+		}); err != nil {
+			t.Fatalf("pin S%02dE%02d %s: %v", season, episode, quality, err)
+		}
+	}
+
+	// Two tiers of the SAME episode → one Search, both tiers pinned.
+	pin(1, 1, "1080p")
+	pin(1, 1, "2160p")
+	if got := atomic.LoadInt64(&searches); got != 1 {
+		t.Fatalf("searches after two tiers of one unit = %d, want 1", got)
+	}
+	for _, q := range []string{"1080p", "2160p"} {
+		want := "shows/Demo (2026) [tmdb-555]/Season 01/Demo (2026) - S01E01 - [" + q + "].mkv"
+		if p, _ := st.ByPath(context.Background(), want); p == nil {
+			t.Fatalf("missing %s pin at %q", q, want)
+		}
+	}
+
+	// A different unit is not served from the first unit's cache — it searches.
+	pin(1, 2, "1080p")
+	if got := atomic.LoadInt64(&searches); got != 2 {
+		t.Fatalf("searches after a new unit = %d, want 2 (fresh search)", got)
 	}
 }
