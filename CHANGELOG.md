@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/dreulavelle/wisp/compare/v1.1.1...v1.2.0) (2026-07-19)
+
+
+### Features
+
+* **monitor:** back off quality tiers that consistently return no results, so an unsatisfiable tier (e.g. 2160p for a show with no 4K) stops keeping a title on the fast retry cadence — capped, never a hard give-up ([#27](https://github.com/dreulavelle/wisp/issues/27))
+
+
+### Performance
+
+* parallelize series episode resolution with bounded concurrency, so a season resolves in tens of seconds instead of minutes ([#22](https://github.com/dreulavelle/wisp/issues/22))
+
 ## [1.1.1](https://github.com/dreulavelle/wisp/compare/v1.1.0...v1.1.1) (2026-07-19)
 
 
