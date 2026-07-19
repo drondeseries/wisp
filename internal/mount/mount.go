@@ -89,7 +89,7 @@ func Start(ctx context.Context, opt Options, log *slog.Logger) (*Mount, error) {
 
 	vfsOpt := vfscommon.Opt // copy defaults
 	vfsOpt.CacheMode = vfscommon.CacheModeOff
-	vfsOpt.DirCacheTime = fs.Duration(10 * time.Second)
+	vfsOpt.DirCacheTime = fs.Duration(0) // disable directory caching for instant metadata/size updates
 	if opt.ReadChunkSize > 0 {
 		vfsOpt.ChunkSize = fs.SizeSuffix(opt.ReadChunkSize)
 	}
