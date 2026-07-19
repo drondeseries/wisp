@@ -21,6 +21,16 @@ import (
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/store"
+	"golang.org/x/sync/errgroup"
+)
+
+// defaultResolveConcurrency is the per-pass episode fan-out used when an invalid
+// (non-positive) limit is supplied; maxResolveConcurrency is the hard ceiling.
+// Both mirror the config clamp so a direct New caller can't exceed the debrid
+// safety envelope.
+const (
+	defaultResolveConcurrency = 4
+	maxResolveConcurrency     = 16
 )
 
 // PinKey identifies a pinned unit for dedupe. Quality is canonical ("" only for
@@ -82,8 +92,12 @@ type Monitor struct {
 	ful      Fulfiller
 	log      *slog.Logger
 	interval time.Duration
-	now      func() time.Time
-	wake     chan struct{}
+	// resolveConcurrency bounds how many aired episodes of one series resolve in
+	// parallel within a pass. It is global (per-title, and titles run one at a
+	// time) so it caps the peak debrid fan-out. Always in [1, maxResolveConcurrency].
+	resolveConcurrency int
+	now                func() time.Time
+	wake               chan struct{}
 	// nextWakeNano is the unix-nano deadline of the sleep timer the Run loop last
 	// armed, published so the schedule API reports the scheduler's real next wake
 	// rather than a reconstruction. Zero until the first pass arms a timer.
@@ -100,14 +114,24 @@ type Monitor struct {
 }
 
 // New builds a monitor. interval is the fallback re-check ceiling.
-func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.Duration, log *slog.Logger) *Monitor {
+// resolveConcurrency bounds per-series episode fan-out per pass; a non-positive
+// value defaults to defaultResolveConcurrency and it is capped at
+// maxResolveConcurrency.
+func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.Duration, resolveConcurrency int, log *slog.Logger) *Monitor {
 	if interval <= 0 {
 		interval = 2 * time.Hour
 	}
+	if resolveConcurrency <= 0 {
+		resolveConcurrency = defaultResolveConcurrency
+	}
+	if resolveConcurrency > maxResolveConcurrency {
+		resolveConcurrency = maxResolveConcurrency
+	}
 	return &Monitor{
 		store: st, meta: meta, ful: ful, log: log, interval: interval,
-		now:  time.Now,
-		wake: make(chan struct{}, 1),
+		resolveConcurrency: resolveConcurrency,
+		now:                time.Now,
+		wake:               make(chan struct{}, 1),
 	}
 }
 
@@ -445,23 +469,37 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passRes
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
-	remaining := 0
+	// Resolve aired episodes concurrently, bounded by resolveConcurrency. Each
+	// episode is one unit of work touching only its own (season, episode) PinKeys,
+	// so the goroutines share the pinned snapshot read-only (no shared mutable
+	// dedupe map). Quality tiers stay sequential inside pinMissing so the upstream
+	// search cache still collapses a title's tiers into one search.
+	var g errgroup.Group
+	g.SetLimit(m.resolveConcurrency)
+	var remaining atomic.Int64
 	for _, ep := range all {
 		if ep.Aired.IsZero() || ep.Aired.After(now) {
 			continue // not aired yet
 		}
-		remaining += m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)
+		g.Go(func() error {
+			// Fold the outcome into an aggregate and always return nil: one
+			// episode's resolver hiccup must never fail-fast the whole season.
+			remaining.Add(int64(m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)))
+			return nil
+		})
 	}
+	_ = g.Wait() // workers never error; Wait blocks until the season's episodes finish
+	rem := int(remaining.Load())
 	nextAir, hasNext := metadata.NextAir(all, now)
 	// A stream usually lags an episode's air time (minutes to hours). If an aired
 	// episode is still unpinned, retry at the interval — don't defer to the next
 	// airstamp, which could be a week (or a mid-season gap) away.
-	if remaining > 0 {
+	if rem > 0 {
 		retry := now.Add(m.interval)
 		if hasNext && nextAir.Before(retry) {
-			return passResult{due: nextAir, reason: store.DueReasonAirstamp, pendingAired: remaining}
+			return passResult{due: nextAir, reason: store.DueReasonAirstamp, pendingAired: rem}
 		}
-		return passResult{due: retry, reason: store.DueReasonRetry, pendingAired: remaining}
+		return passResult{due: retry, reason: store.DueReasonRetry, pendingAired: rem}
 	}
 	if hasNext {
 		return passResult{due: nextAir, reason: store.DueReasonAirstamp} // all aired episodes pinned — wake near the next airing
@@ -470,11 +508,14 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passRes
 }
 
 // pinMissing pins every target not already pinned, returning how many remain
-// unpinned (0 = fully satisfied). It updates pinned as it succeeds so multiple
-// targets in one pass dedupe against each other.
+// unpinned (0 = fully satisfied). The pinned snapshot is treated as read-only —
+// it may be shared across the concurrent per-episode workers — so pins made
+// within this call are tracked in a local session map for intra-call dedupe
+// (e.g. a default "" tier already satisfied by an earlier tier of the same unit).
 func (m *Monitor) pinMissing(ctx context.Context, targets []Target, pinned map[PinKey]bool) (remaining int) {
+	var session map[PinKey]bool // pins made in this call; lazily allocated
 	for _, t := range targets {
-		if isPinned(pinned, t.Season, t.Episode, t.Quality) {
+		if isPinned(pinned, t.Season, t.Episode, t.Quality) || isPinned(session, t.Season, t.Episode, t.Quality) {
 			continue
 		}
 		ok, err := m.ful.Pin(ctx, t)
@@ -487,7 +528,10 @@ func (m *Monitor) pinMissing(ctx context.Context, targets []Target, pinned map[P
 			remaining++ // no stream yet
 			continue
 		}
-		pinned[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
+		if session == nil {
+			session = make(map[PinKey]bool, len(targets))
+		}
+		session[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
 		m.log.Info("pinned", "title", t.Title, "season", t.Season, "episode", t.Episode, "quality", t.Quality)
 	}
 	return remaining

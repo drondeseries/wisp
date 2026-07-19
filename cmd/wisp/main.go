@@ -74,7 +74,7 @@ func main() {
 		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets, metadata.WithLogger(log)),
 		startedAt: time.Now(),
 	}
-	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, log)
+	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, log)
 
 	srv := server.New(st, app.reResolve, log)
 	app.srv = srv

@@ -59,6 +59,11 @@ type Config struct {
 	// ScheduleInterval is the fallback ceiling for the monitor loop; the
 	// scheduler otherwise wakes near a monitored item's next known air/release.
 	ScheduleInterval time.Duration
+	// ResolveConcurrency bounds how many episodes a single series resolves in
+	// parallel during one scheduler pass. It is a global debrid safety valve —
+	// titles are processed one at a time, so this is the peak resolver fan-out.
+	// Clamped to [1, 16].
+	ResolveConcurrency int
 	// TMDBAPIKey enables home-media release gating via TMDB (v3 key or v4 token).
 	TMDBAPIKey string
 	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
@@ -90,6 +95,7 @@ func Load() (*Config, error) {
 		ReadChunkSize:        sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
 		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
+		ResolveConcurrency:   clampInt(intEnv("WISP_RESOLVE_CONCURRENCY", 4), 1, 16),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 	}
@@ -111,6 +117,30 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// intEnv parses a base-10 integer, falling back on empty or unparseable input.
+func intEnv(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// clampInt bounds n to the inclusive range [lo, hi].
+func clampInt(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 // listEnv parses a comma-separated list, upper-casing and trimming each entry

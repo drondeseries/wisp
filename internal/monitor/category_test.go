@@ -83,7 +83,7 @@ func TestIntakeInheritsCategoryFromExistingPins(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	st := newStore(t)
-	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, log)
+	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, 4, log)
 	m.now = func() time.Time { return date("2026-01-01T00:00:00Z") }
 
 	// A legacy/direct pin already decided anime for this title.
@@ -115,7 +115,7 @@ func TestIntakeFirstWriterWins(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	st := newStore(t)
 	// Both intakes carry explicit flags, so the heuristic (network) never runs.
-	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, log)
+	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, 4, log)
 	m.now = func() time.Time { return date("2026-01-01T00:00:00Z") }
 
 	if err := m.Intake(ctx, Request{MediaType: "movie", IMDbID: "tt5", Title: "X", IsAnime: ptrBool(false)}); err != nil {

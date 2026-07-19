@@ -2,10 +2,14 @@ package monitor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +19,10 @@ import (
 )
 
 // fakeFul records pin calls and models existing pins + unavailable episodes.
+// Pin is now invoked concurrently (bounded per-episode fan-out), so all mutable
+// state is guarded by mu.
 type fakeFul struct {
+	mu       sync.Mutex
 	pinned   map[PinKey]bool
 	noStream map[[2]int]bool // (season,episode) with no playable stream
 	calls    int
@@ -26,6 +33,8 @@ func newFakeFul() *fakeFul {
 }
 
 func (f *fakeFul) Pin(_ context.Context, t Target) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	if f.noStream[[2]int{t.Season, t.Episode}] {
 		return false, nil
@@ -35,6 +44,8 @@ func (f *fakeFul) Pin(_ context.Context, t Target) (bool, error) {
 }
 
 func (f *fakeFul) PinnedKeys(_ context.Context, _ string) (map[PinKey]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	out := make(map[PinKey]bool, len(f.pinned))
 	for k := range f.pinned {
 		out[k] = true
@@ -63,7 +74,7 @@ func testMonitor(t *testing.T, mux *http.ServeMux, ful Fulfiller, now time.Time)
 	t.Cleanup(srv.Close)
 	meta := metadata.New("v3key", []string{"US"}, metadata.WithBaseURLs(srv.URL, srv.URL, srv.URL))
 	st := newStore(t)
-	m := New(st, meta, ful, time.Hour, slog.New(slog.DiscardHandler))
+	m := New(st, meta, ful, time.Hour, 4, slog.New(slog.DiscardHandler))
 	m.now = func() time.Time { return now }
 	return m, st
 }
@@ -270,12 +281,195 @@ func TestForceRefreshOverridesFutureDueThenResumes(t *testing.T) {
 
 func TestMonitorRejectsUngatableMovie(t *testing.T) {
 	st := newStore(t)
-	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, slog.New(slog.DiscardHandler)) // no TMDB key
+	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, 4, slog.New(slog.DiscardHandler)) // no TMDB key
 	// tmdb-only movie, no imdb, no TMDB key → no way to gate release.
 	if err := m.Intake(context.Background(), Request{MediaType: "movie", TMDbID: "603", Title: "X"}); err == nil {
 		t.Fatal("expected rejection of ungatable tmdb-only movie")
 	}
 	if n, _ := st.CountMonitored(context.Background()); n != 0 {
 		t.Fatalf("ungatable movie was stored: %d", n)
+	}
+}
+
+// instrumentedFul models per-Pin latency and tracks peak concurrent Pin calls so
+// tests can assert the bounded fan-out. failEp episodes return an error; noStream
+// episodes return (false, nil). All state is guarded for concurrent use.
+type instrumentedFul struct {
+	latency  time.Duration
+	failEp   map[[2]int]bool
+	noStream map[[2]int]bool
+
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+	calls       atomic.Int32
+
+	mu     sync.Mutex
+	seeded map[PinKey]bool // pre-existing pins reported by PinnedKeys
+	pinned map[PinKey]bool // pins created via Pin
+}
+
+func newInstrumentedFul(latency time.Duration) *instrumentedFul {
+	return &instrumentedFul{
+		latency:  latency,
+		failEp:   map[[2]int]bool{},
+		noStream: map[[2]int]bool{},
+		seeded:   map[PinKey]bool{},
+		pinned:   map[PinKey]bool{},
+	}
+}
+
+func (f *instrumentedFul) Pin(_ context.Context, t Target) (bool, error) {
+	n := f.inFlight.Add(1)
+	for { // publish the running peak
+		cur := f.maxInFlight.Load()
+		if n <= cur || f.maxInFlight.CompareAndSwap(cur, n) {
+			break
+		}
+	}
+	defer f.inFlight.Add(-1)
+	f.calls.Add(1)
+	if f.latency > 0 {
+		time.Sleep(f.latency)
+	}
+	if f.failEp[[2]int{t.Season, t.Episode}] {
+		return false, errors.New("resolver hiccup")
+	}
+	if f.noStream[[2]int{t.Season, t.Episode}] {
+		return false, nil
+	}
+	f.mu.Lock()
+	f.pinned[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
+	f.mu.Unlock()
+	return true, nil
+}
+
+func (f *instrumentedFul) PinnedKeys(_ context.Context, _ string) (map[PinKey]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[PinKey]bool{}
+	for k := range f.seeded {
+		out[k] = true
+	}
+	for k := range f.pinned {
+		out[k] = true
+	}
+	return out, nil
+}
+
+// seriesEpisodesMux serves a Cinemeta series with n episodes, all aired in the
+// past relative to the test clock, so processSeries resolves every one.
+func seriesEpisodesMux(imdb string, n int) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/meta/series/"+imdb+".json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"meta":{"videos":[`))
+		for i := 1; i <= n; i++ {
+			if i > 1 {
+				w.Write([]byte(","))
+			}
+			fmt.Fprintf(w, `{"season":1,"episode":%d,"released":"2026-01-01T00:00:00Z"}`, i)
+		}
+		w.Write([]byte(`]}}`))
+	})
+	mux.HandleFunc("/lookup/shows", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"id":0}`)) })
+	return mux
+}
+
+func seriesItem(imdb string, qualities ...string) store.Monitored {
+	return store.Monitored{
+		Key: "series:" + imdb, MediaType: "series", IMDbID: imdb,
+		Qualities: qualities, Enabled: true, Category: library.Root("series", false),
+	}
+}
+
+// A season resolves its aired episodes in parallel, but never above the limit:
+// peak concurrent Pin calls stays ≤ resolveConcurrency, and total wall-clock
+// reflects the parallelism (≈ ceil(n/limit) waves, not n sequential).
+func TestSeriesResolvesEpisodesWithBoundedConcurrency(t *testing.T) {
+	const (
+		episodes = 8
+		limit    = 4
+		latency  = 50 * time.Millisecond
+	)
+	ful := newInstrumentedFul(latency)
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", episodes), ful, now)
+	m.resolveConcurrency = limit
+
+	start := time.Now()
+	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"))
+	elapsed := time.Since(start)
+
+	if got := ful.calls.Load(); got != episodes {
+		t.Fatalf("Pin calls = %d, want %d (one per aired episode)", got, episodes)
+	}
+	if res.pendingAired != 0 {
+		t.Fatalf("pendingAired = %d, want 0 (every episode resolved)", res.pendingAired)
+	}
+	if peak := ful.maxInFlight.Load(); peak > limit {
+		t.Fatalf("peak concurrent Pin = %d, exceeds limit %d", peak, limit)
+	} else if peak < 2 {
+		t.Fatalf("peak concurrent Pin = %d, expected real parallelism (>1)", peak)
+	}
+	// Sequential would be episodes*latency = 400ms; ~2 waves is ~100ms. Allow
+	// generous slack for a loaded CI while still proving it isn't serial.
+	if maxWall := time.Duration(episodes) * latency; elapsed >= maxWall {
+		t.Fatalf("wall-clock %v ≥ sequential floor %v — not parallel", elapsed, maxWall)
+	}
+}
+
+// The aggregate pendingAired from the parallel path must equal the sequential
+// (limit=1) result for a mix of already-pinned, freshly-pinned, and no-stream
+// episodes.
+func TestSeriesAggregateMatchesSequential(t *testing.T) {
+	// E2 already pinned (dedupe → 0), E3 & E5 have no stream (→ remaining),
+	// the rest pin cleanly (→ 0). Expected pendingAired = 2, both runs.
+	build := func() *instrumentedFul {
+		f := newInstrumentedFul(0)
+		f.seeded[PinKey{1, 2, "1080p"}] = true
+		f.noStream[[2]int{1, 3}] = true
+		f.noStream[[2]int{1, 5}] = true
+		return f
+	}
+
+	run := func(limit int) int {
+		ful := build()
+		now := date("2026-06-01T00:00:00Z")
+		m, _ := testMonitor(t, seriesEpisodesMux("tt7", 6), ful, now)
+		m.resolveConcurrency = limit
+		return m.processSeries(context.Background(), seriesItem("tt7", "1080p")).pendingAired
+	}
+
+	seq := run(1)
+	par := run(4)
+	if seq != 2 {
+		t.Fatalf("sequential pendingAired = %d, want 2", seq)
+	}
+	if par != seq {
+		t.Fatalf("parallel pendingAired = %d != sequential %d", par, seq)
+	}
+}
+
+// One episode's resolver error must not abort the rest of the season: every
+// other aired episode is still processed, and only the failed unit is counted
+// as remaining.
+func TestSeriesEpisodeErrorDoesNotAbortOthers(t *testing.T) {
+	ful := newInstrumentedFul(0)
+	ful.failEp[[2]int{1, 3}] = true // E3 errors on Pin
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 6), ful, now)
+	m.resolveConcurrency = 4
+
+	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"))
+
+	if got := ful.calls.Load(); got != 6 {
+		t.Fatalf("Pin calls = %d, want 6 (error must not short-circuit the season)", got)
+	}
+	if res.pendingAired != 1 {
+		t.Fatalf("pendingAired = %d, want 1 (only the failed episode)", res.pendingAired)
+	}
+	for _, ep := range []int{1, 2, 4, 5, 6} {
+		if !ful.pinned[PinKey{1, ep, "1080p"}] {
+			t.Fatalf("episode %d was not pinned despite E3 failing", ep)
+		}
 	}
 }

@@ -27,7 +27,7 @@ func scheduleTestApp(t *testing.T) *app {
 	a := &app{store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil),
 		webhook: notify.New(notify.Options{}, log)}
-	a.mon = monitor.New(st, a.meta, a, 2*time.Hour, log)
+	a.mon = monitor.New(st, a.meta, a, 2*time.Hour, 4, log)
 	return a
 }
 

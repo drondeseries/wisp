@@ -10,6 +10,7 @@ All configuration is via environment variables.
 | `WISP_DB_PATH` | `/data/wisp.db` | bbolt database for pins **and** monitors. Persist this (a volume) to keep your library and watchlist across restarts. |
 | `WISP_MOUNT_PATH` | — | If set, wisp self-mounts the library here (needs `/dev/fuse` + `SYS_ADMIN`). Unset = serve HTTP only and mount it yourself. |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Fallback ceiling for the monitor loop. The scheduler otherwise wakes near a monitored item's next known airstamp/release — it doesn't poll on a fixed tick. |
+| `WISP_RESOLVE_CONCURRENCY` | `4` | How many episodes of a series resolve in parallel per scheduler pass. Titles are still processed one at a time, so this is the peak resolver fan-out against your debrid provider — raise it to drain long seasons faster, lower it if you hit rate limits. Clamped to `1`–`16`. |
 | `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token. Enables home-media release gating for movies (digital/physical dates); without it, wisp falls back to Cinemeta's release date. |
 | `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | ISO-3166-1 regions whose TMDB digital/physical release makes a movie eligible (any one releasing counts). |
 | `WISP_NOTIFY_ARR_WEBHOOK_URL` | — | ARR-compatible Autoscan webhook (Silo/Sonarr/Radarr wire format) for instant import, rename, and delete rescans. Keep secret. |

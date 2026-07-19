@@ -37,7 +37,7 @@ func offlineApp(t *testing.T) *app {
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(stub.URL, stub.URL, stub.URL)),
 		webhook: notify.New(notify.Options{}, log),
 	}
-	a.mon = monitor.New(st, a.meta, a, time.Hour, log)
+	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, log)
 	return a
 }
 
@@ -358,7 +358,7 @@ func TestIntakeDoesNotBlockOnMetadata(t *testing.T) {
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(slow.URL, slow.URL, slow.URL)),
 		webhook: notify.New(notify.Options{}, log),
 	}
-	a.mon = monitor.New(st, a.meta, a, time.Hour, log)
+	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, log)
 
 	// imdb present (no tmdb→imdb lookup), is_anime omitted → the only metadata
 	// call would be the heuristic, which must be deferred.

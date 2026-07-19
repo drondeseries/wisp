@@ -29,7 +29,7 @@ func testApp(t *testing.T) *app {
 		meta:    metadata.New("", nil),
 		webhook: notify.New(notify.Options{}, log),
 	}
-	a.mon = monitor.New(st, a.meta, a, time.Hour, log) // Run not started → Intake only records
+	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, log) // Run not started → Intake only records
 	return a
 }
 

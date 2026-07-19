@@ -44,6 +44,41 @@ func TestDurationEnv(t *testing.T) {
 	}
 }
 
+func TestIntEnv(t *testing.T) {
+	cases := map[string]int{
+		"8":     8,
+		"0":     0,
+		"-3":    -3,
+		"":      7, // fallback
+		"bogus": 7, // fallback
+		"1.5":   7, // fallback (not an int)
+	}
+	for in, want := range cases {
+		t.Setenv("WISP_TEST_INT", in)
+		if got := intEnv("WISP_TEST_INT", 7); got != want {
+			t.Fatalf("intEnv(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestClampInt(t *testing.T) {
+	cases := []struct {
+		n, lo, hi, want int
+	}{
+		{5, 1, 16, 5},   // in range
+		{0, 1, 16, 1},   // below floor
+		{-4, 1, 16, 1},  // below floor
+		{99, 1, 16, 16}, // above ceiling
+		{16, 1, 16, 16}, // at ceiling
+		{1, 1, 16, 1},   // at floor
+	}
+	for _, c := range cases {
+		if got := clampInt(c.n, c.lo, c.hi); got != c.want {
+			t.Fatalf("clampInt(%d, %d, %d) = %d, want %d", c.n, c.lo, c.hi, got, c.want)
+		}
+	}
+}
+
 func TestListEnv(t *testing.T) {
 	t.Setenv("WISP_TEST_LIST", " us , gb ,, jp ")
 	got := listEnv("WISP_TEST_LIST", []string{"X"})
