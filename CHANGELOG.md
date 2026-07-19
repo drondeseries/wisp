@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.1](https://github.com/dreulavelle/wisp/compare/v1.1.0...v1.1.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **aiostreams:** self-heal bypasses the search cache ([#21](https://github.com/dreulavelle/wisp/issues/21)) ([705aabf](https://github.com/dreulavelle/wisp/commit/705aabf02e5eeceaeaab2d1d08f191fba979944d))
+* force-recheck on refresh + TMDB failure falls back to Cinemeta ([#19](https://github.com/dreulavelle/wisp/issues/19)) ([80bd79d](https://github.com/dreulavelle/wisp/commit/80bd79d6c6f15c45d6c57e7951e0f99d193dec64))
+
+
+### Performance
+
+* **aiostreams:** serve every quality tier from one Search per unit ([ed5549e](https://github.com/dreulavelle/wisp/commit/ed5549e72051acb59ca48a26db1b5d434a56714c))
+* one AIOStreams search serves all requested quality tiers ([#18](https://github.com/dreulavelle/wisp/issues/18)) ([ed5549e](https://github.com/dreulavelle/wisp/commit/ed5549e72051acb59ca48a26db1b5d434a56714c))
+
 ## [1.1.0](https://github.com/dreulavelle/wisp/compare/v1.0.0...v1.1.0) (2026-07-19)
 
 
